@@ -43,7 +43,7 @@ impl Header {
                     VStack::new(cx, |cx| {
                         SegmentedParam::new(cx, Data::params, |p| &p.sat_type, Some("SAT TYPE"));
                     })
-                    .width(Pixels(120.0))
+                    .width(Stretch(1.0))
                     .child_top(Stretch(1.0))
                     .child_bottom(Stretch(1.0));
 
@@ -59,31 +59,38 @@ impl Header {
                     VStack::new(cx, |cx| {
                         SegmentedParam::new(cx, Data::params, |p| &p.os_realtime, Some("OS REALTIME"));
                     })
-                    .width(Pixels(100.0))
+                    .width(Stretch(1.0))
                     .child_top(Stretch(1.0))
                     .child_bottom(Stretch(1.0));
+
+                    // Divider
+                    Element::new(cx)
+                        .width(Pixels(1.0))
+                        .height(Pixels(32.0))
+                        .background_color(Color::rgba(255, 255, 255, 20))
+                        .top(Stretch(1.0))
+                        .bottom(Stretch(1.0));
 
                     // OS Render segmented control
                     VStack::new(cx, |cx| {
                         SegmentedParam::new(cx, Data::params, |p| &p.os_render, Some("OS RENDER"));
                     })
-                    .width(Pixels(100.0))
+                    .width(Stretch(1.0))
                     .child_top(Stretch(1.0))
                     .child_bottom(Stretch(1.0));
                 })
                 .col_between(Pixels(12.0))
-                .child_left(Stretch(1.0))
-                .child_right(Stretch(1.0))
                 .child_top(Stretch(1.0))
                 .child_bottom(Stretch(1.0))
-                .background_color(Color::rgba(255, 255, 255, 10))
-                .border_color(Color::rgba(255, 255, 255, 20))
-                .border_width(Pixels(1.0))
-                .border_radius(Pixels(8.0))
+                .width(Stretch(1.0))
                 .left(Pixels(12.0))
                 .right(Pixels(12.0))
                 .top(Pixels(4.0))
-                .bottom(Pixels(4.0));
+                .bottom(Pixels(4.0))
+                .background_color(Color::rgba(255, 255, 255, 10))
+                .border_color(Color::rgba(255, 255, 255, 20))
+                .border_width(Pixels(1.0))
+                .border_radius(Pixels(8.0));
 
                 // ── Right group: Out Gain ──
                 HStack::new(cx, |cx| {

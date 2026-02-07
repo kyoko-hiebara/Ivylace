@@ -1,12 +1,18 @@
 /// Custom glass rotary knob widget.
 /// Supports three sizes (sm/md/lg), arc indicator, drag interaction.
+/// Optional threshold linking: when `link_params` is set, dragging propagates
+/// delta changes to other linked bands' thresholds.
+use std::sync::Arc;
+
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 use nih_plug_vizia::widgets::util::ModifiersExt;
+use nih_plug_vizia::widgets::RawParamEvent;
 
 use super::theme;
+use crate::IvylaceParams;
 
 /// Knob sizes matching Figma spec
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +52,13 @@ struct GranularDragStatus {
     starting_value: f32,
 }
 
+/// State for linked bands during a drag gesture (delta mode).
+/// Records each linked band's normalized threshold at drag start.
+struct LinkedDragState {
+    /// (band_index, start_normalized_value, ParamPtr)
+    entries: Vec<(usize, f32, ParamPtr)>,
+}
+
 pub struct GlassKnob {
     param_base: ParamWidgetBase,
     size: KnobSize,
@@ -56,6 +69,16 @@ pub struct GlassKnob {
     /// Whether a non-drag gesture is active (reset via alt-click or double-click)
     /// and needs end_set_parameter on MouseUp
     reset_gesture_active: bool,
+
+    // --- Link support (optional, only for threshold knobs) ---
+    /// Access to all params for reading link state and setting other thresholds
+    link_params: Option<Arc<IvylaceParams>>,
+    /// Which band index this knob belongs to
+    link_band_idx: usize,
+    /// The normalized value of this knob when a linked drag started
+    my_start_value: f32,
+    /// Active linked drag state (populated on drag start if any bands are linked)
+    linked_drag: Option<LinkedDragState>,
 }
 
 impl GlassKnob {
@@ -82,51 +105,174 @@ impl GlassKnob {
             drag_active: false,
             granular_drag_status: None,
             reset_gesture_active: false,
+            link_params: None,
+            link_band_idx: 0,
+            my_start_value: 0.0,
+            linked_drag: None,
         }
         .build(cx, |cx| {
-            // VStack layout: knob drawing area → label name → value display
-            VStack::new(cx, |cx| {
-                // Spacer element for the knob drawing area (drawn by View::draw)
-                Element::new(cx)
-                    .width(Pixels(size.outer()))
-                    .height(Pixels(size.outer()))
-                    .left(Stretch(1.0))
-                    .right(Stretch(1.0))
-                    .hoverable(false);
-
-                // Label name below the knob (e.g., "THRESHOLD", "IN GAIN")
-                Label::new(cx, &label.to_uppercase())
-                    .font_size(9.0)
-                    .font_weight(FontWeightKeyword::Medium)
-                    .color(Color::rgba(255, 255, 255, 128))
-                    .font_family(vec![FamilyOwned::Name(String::from(nih_plug_vizia::assets::NOTO_SANS))])
-                    .text_align(TextAlign::Center)
-                    .width(Stretch(1.0))
-                    .height(Pixels(13.0))
-                    .hoverable(false);
-
-                // Value display below the label (e.g., "-20.0 dB")
-                let display_lens = ParamWidgetBase::make_lens(
-                    params.clone(),
-                    params_to_param,
-                    |param| param.normalized_value_to_string(param.unmodulated_normalized_value(), true),
-                );
-
-                Label::new(cx, display_lens)
-                    .font_size(10.0)
-                    .color(Color::rgba(255, 255, 255, 230))
-                    .font_family(vec![FamilyOwned::Name(String::from(nih_plug_vizia::assets::NOTO_SANS))])
-                    .text_align(TextAlign::Center)
-                    .width(Stretch(1.0))
-                    .height(Pixels(14.0))
-                    .hoverable(false);
-            })
-            .row_between(Pixels(1.0))
-            .width(Stretch(1.0))
-            .height(Auto);
+            Self::build_labels(cx, params, params_to_param, size, label);
         })
         .width(Pixels(size.outer().max(50.0)))
         .height(Auto)
+    }
+
+    /// Constructor for threshold knobs with link support.
+    pub fn new_with_link<'a, L, Params, P, FMap>(
+        cx: &'a mut Context,
+        params: L,
+        params_to_param: FMap,
+        size: KnobSize,
+        color: vg::Color,
+        label: &str,
+        all_params: Arc<IvylaceParams>,
+        band_idx: usize,
+    ) -> Handle<'a, Self>
+    where
+        L: Lens<Target = Params> + Clone,
+        Params: 'static,
+        P: Param + 'static,
+        FMap: Fn(&Params) -> &P + Copy + 'static,
+    {
+        let param_base = ParamWidgetBase::new(cx, params.clone(), params_to_param);
+
+        Self {
+            param_base,
+            size,
+            color,
+            drag_active: false,
+            granular_drag_status: None,
+            reset_gesture_active: false,
+            link_params: Some(all_params),
+            link_band_idx: band_idx,
+            my_start_value: 0.0,
+            linked_drag: None,
+        }
+        .build(cx, |cx| {
+            Self::build_labels(cx, params, params_to_param, size, label);
+        })
+        .width(Pixels(size.outer().max(50.0)))
+        .height(Auto)
+    }
+
+    /// Shared label building logic for both constructors.
+    fn build_labels<L, Params, P, FMap>(
+        cx: &mut Context,
+        params: L,
+        params_to_param: FMap,
+        size: KnobSize,
+        label: &str,
+    ) where
+        L: Lens<Target = Params> + Clone,
+        Params: 'static,
+        P: Param + 'static,
+        FMap: Fn(&Params) -> &P + Copy + 'static,
+    {
+        VStack::new(cx, |cx| {
+            // Spacer element for the knob drawing area (drawn by View::draw)
+            Element::new(cx)
+                .width(Pixels(size.outer()))
+                .height(Pixels(size.outer()))
+                .left(Stretch(1.0))
+                .right(Stretch(1.0))
+                .hoverable(false);
+
+            // Label name below the knob (e.g., "THRESHOLD", "IN GAIN")
+            Label::new(cx, &label.to_uppercase())
+                .font_size(9.0)
+                .font_weight(FontWeightKeyword::Medium)
+                .color(Color::rgba(255, 255, 255, 128))
+                .font_family(vec![FamilyOwned::Name(String::from(
+                    nih_plug_vizia::assets::NOTO_SANS,
+                ))])
+                .text_align(TextAlign::Center)
+                .width(Stretch(1.0))
+                .height(Pixels(13.0))
+                .hoverable(false);
+
+            // Value display below the label (e.g., "-20.0 dB")
+            let display_lens = ParamWidgetBase::make_lens(params.clone(), params_to_param, |param| {
+                param.normalized_value_to_string(param.unmodulated_normalized_value(), true)
+            });
+
+            Label::new(cx, display_lens)
+                .font_size(10.0)
+                .color(Color::rgba(255, 255, 255, 230))
+                .font_family(vec![FamilyOwned::Name(String::from(
+                    nih_plug_vizia::assets::NOTO_SANS,
+                ))])
+                .text_align(TextAlign::Center)
+                .width(Stretch(1.0))
+                .height(Pixels(14.0))
+                .hoverable(false);
+        })
+        .row_between(Pixels(1.0))
+        .width(Stretch(1.0))
+        .height(Auto);
+    }
+
+    // ── Link helpers ──
+
+    /// Collect linked bands and begin their parameter gestures.
+    /// Returns true if any linked bands were found.
+    fn begin_linked(&mut self, cx: &mut EventContext) -> bool {
+        let Some(all_params) = &self.link_params else {
+            return false;
+        };
+
+        // This band must have link enabled
+        if !all_params.bands[self.link_band_idx].link.value() {
+            self.linked_drag = None;
+            return false;
+        }
+
+        let mut entries = Vec::new();
+        for i in 0..crate::NUM_BANDS {
+            if i == self.link_band_idx {
+                continue;
+            }
+            if all_params.bands[i].link.value() {
+                let param = &all_params.bands[i].threshold;
+                let ptr = param.as_ptr();
+                let start_val = unsafe { ptr.unmodulated_normalized_value() };
+                entries.push((i, start_val, ptr));
+            }
+        }
+
+        if entries.is_empty() {
+            self.linked_drag = None;
+            return false;
+        }
+
+        // Begin gesture for each linked band
+        for &(_, _, ptr) in &entries {
+            cx.emit(RawParamEvent::BeginSetParameter(ptr));
+        }
+
+        self.my_start_value = self.param_base.unmodulated_normalized_value();
+        self.linked_drag = Some(LinkedDragState { entries });
+        true
+    }
+
+    /// Propagate a delta change to all linked bands.
+    fn update_linked(&self, cx: &mut EventContext, new_normalized: f32) {
+        let Some(state) = &self.linked_drag else {
+            return;
+        };
+        let delta = new_normalized - self.my_start_value;
+        for &(_, start_val, ptr) in &state.entries {
+            let linked_new = (start_val + delta).clamp(0.0, 1.0);
+            cx.emit(RawParamEvent::SetParameterNormalized(ptr, linked_new));
+        }
+    }
+
+    /// End gesture for all linked bands.
+    fn end_linked(&mut self, cx: &mut EventContext) {
+        if let Some(state) = self.linked_drag.take() {
+            for (_, _, ptr) in state.entries {
+                cx.emit(RawParamEvent::EndSetParameter(ptr));
+            }
+        }
     }
 }
 
@@ -237,7 +383,7 @@ impl View for GlassKnob {
             canvas.stroke_path(&path, &glow_paint);
         }
 
-        // Label and value are rendered as VIZIA child Labels (see build())
+        // Label and value are rendered as VIZIA child Labels (see build_labels())
     }
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
@@ -246,9 +392,18 @@ impl View for GlassKnob {
                 if cx.modifiers().alt() || cx.modifiers().command() {
                     // Alt/Cmd+Click: reset to default
                     // Split gesture: begin+set on MouseDown, end on MouseUp
+                    let current = self.param_base.unmodulated_normalized_value();
+                    let default = self.param_base.default_normalized_value();
+
                     self.param_base.begin_set_parameter(cx);
-                    self.param_base.set_normalized_value(cx, self.param_base.default_normalized_value());
+                    self.param_base.set_normalized_value(cx, default);
                     self.reset_gesture_active = true;
+
+                    // Link: propagate delta to linked bands
+                    self.my_start_value = current;
+                    self.begin_linked(cx);
+                    self.update_linked(cx, default);
+
                     cx.capture();
                     cx.focus();
                 } else {
@@ -258,6 +413,9 @@ impl View for GlassKnob {
                     cx.set_active(true);
 
                     self.param_base.begin_set_parameter(cx);
+
+                    // Link: begin linked gesture
+                    self.begin_linked(cx);
 
                     if cx.modifiers().shift() {
                         self.granular_drag_status = Some(GranularDragStatus {
@@ -272,17 +430,25 @@ impl View for GlassKnob {
             }
             WindowEvent::MouseDoubleClick(MouseButton::Left) => {
                 // Double-click: reset to default
-                // Split gesture: begin+set on DoubleClick, end on MouseUp
+                let current = self.param_base.unmodulated_normalized_value();
                 let default = self.param_base.default_normalized_value();
+
                 // If a drag gesture is already active from the preceding MouseDown,
                 // end it first before starting the reset gesture
                 if self.drag_active {
                     self.param_base.end_set_parameter(cx);
+                    self.end_linked(cx);
                     self.drag_active = false;
                 }
                 self.param_base.begin_set_parameter(cx);
                 self.param_base.set_normalized_value(cx, default);
                 self.reset_gesture_active = true;
+
+                // Link: propagate delta reset
+                self.my_start_value = current;
+                self.begin_linked(cx);
+                self.update_linked(cx, default);
+
                 cx.capture();
                 meta.consume();
             }
@@ -292,12 +458,14 @@ impl View for GlassKnob {
                     cx.release();
                     cx.set_active(false);
                     self.param_base.end_set_parameter(cx);
+                    self.end_linked(cx);
                     meta.consume();
                 } else if self.reset_gesture_active {
                     // End the reset gesture (alt-click or double-click)
                     self.reset_gesture_active = false;
                     cx.release();
                     self.param_base.end_set_parameter(cx);
+                    self.end_linked(cx);
                     meta.consume();
                 }
             }
@@ -305,7 +473,7 @@ impl View for GlassKnob {
                 if self.drag_active {
                     let sensitivity = if cx.modifiers().shift() { 2000.0 } else { 200.0 };
 
-                    if cx.modifiers().shift() {
+                    let new_value = if cx.modifiers().shift() {
                         let status = self.granular_drag_status.get_or_insert(GranularDragStatus {
                             starting_y: *y,
                             starting_value: self.param_base.unmodulated_normalized_value(),
@@ -313,21 +481,21 @@ impl View for GlassKnob {
 
                         let delta_y = status.starting_y - *y;
                         let delta_normalized = delta_y / sensitivity;
-                        let new_value = (status.starting_value + delta_normalized).clamp(0.0, 1.0);
-                        self.param_base.set_normalized_value(cx, new_value);
+                        (status.starting_value + delta_normalized).clamp(0.0, 1.0)
+                    } else if let Some(status) = &self.granular_drag_status {
+                        let delta_y = status.starting_y - *y;
+                        let delta_normalized = delta_y / sensitivity;
+                        (status.starting_value + delta_normalized).clamp(0.0, 1.0)
                     } else {
-                        if let Some(status) = &self.granular_drag_status {
-                            let delta_y = status.starting_y - *y;
-                            let delta_normalized = delta_y / sensitivity;
-                            let new_value = (status.starting_value + delta_normalized).clamp(0.0, 1.0);
-                            self.param_base.set_normalized_value(cx, new_value);
-                        } else {
-                            self.granular_drag_status = Some(GranularDragStatus {
-                                starting_y: *y,
-                                starting_value: self.param_base.unmodulated_normalized_value(),
-                            });
-                        }
-                    }
+                        self.granular_drag_status = Some(GranularDragStatus {
+                            starting_y: *y,
+                            starting_value: self.param_base.unmodulated_normalized_value(),
+                        });
+                        return; // First move just records starting position
+                    };
+
+                    self.param_base.set_normalized_value(cx, new_value);
+                    self.update_linked(cx, new_value);
                 }
             }
             WindowEvent::KeyUp(_, Some(Key::Shift)) => {
@@ -340,20 +508,26 @@ impl View for GlassKnob {
             }
             WindowEvent::MouseScroll(_sx, sy) => {
                 let use_finer = cx.modifiers().shift();
+                let current = self.param_base.unmodulated_normalized_value();
+
                 if !self.drag_active {
                     self.param_base.begin_set_parameter(cx);
+                    // Link: begin for scroll
+                    self.my_start_value = current;
+                    self.begin_linked(cx);
                 }
 
-                let current = self.param_base.unmodulated_normalized_value();
                 let new_val = if *sy > 0.0 {
                     self.param_base.next_normalized_step(current, use_finer)
                 } else {
                     self.param_base.previous_normalized_step(current, use_finer)
                 };
                 self.param_base.set_normalized_value(cx, new_val);
+                self.update_linked(cx, new_val);
 
                 if !self.drag_active {
                     self.param_base.end_set_parameter(cx);
+                    self.end_linked(cx);
                 }
                 meta.consume();
             }

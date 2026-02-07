@@ -12,6 +12,7 @@ pub enum ToggleVariant {
     Normal,
     Solo,
     Sat,
+    Power,
 }
 
 pub struct ToggleButton {
@@ -85,7 +86,7 @@ impl View for ToggleButton {
         let active_color = match self.variant {
             ToggleVariant::Solo => theme::solo_color(),
             ToggleVariant::Sat => theme::accent(),
-            ToggleVariant::Normal => self.color,
+            ToggleVariant::Normal | ToggleVariant::Power => self.color,
         };
 
         // ── Button background ──
@@ -123,6 +124,38 @@ impl View for ToggleButton {
                 border_paint.set_line_width(1.0 * dpi);
                 canvas.stroke_path(&path, &border_paint);
             }
+        }
+
+        // ── Power icon (drawn for Power variant) ──
+        if self.variant == ToggleVariant::Power {
+            let icon_cx = bounds.x + bounds.w * 0.5;
+            let icon_cy = bounds.y + bounds.h * 0.5;
+            let r = 6.0 * dpi;
+
+            let icon_color = if active {
+                vg::Color::rgba(255, 255, 255, 240)
+            } else {
+                vg::Color::rgba(255, 255, 255, 140)
+            };
+
+            // Arc (270° open at top)
+            let mut arc_path = vg::Path::new();
+            let start = (-60.0_f32).to_radians(); // ~300° → opening at top
+            let end = (240.0_f32).to_radians();
+            arc_path.arc(icon_cx, icon_cy, r, start, end, vg::Solidity::Hole);
+            let mut arc_paint = vg::Paint::color(icon_color);
+            arc_paint.set_line_width(1.8 * dpi);
+            arc_paint.set_line_cap(vg::LineCap::Round);
+            canvas.stroke_path(&arc_path, &arc_paint);
+
+            // Vertical line at top center
+            let mut line_path = vg::Path::new();
+            line_path.move_to(icon_cx, icon_cy - r - 1.0 * dpi);
+            line_path.line_to(icon_cx, icon_cy - 1.5 * dpi);
+            let mut line_paint = vg::Paint::color(icon_color);
+            line_paint.set_line_width(1.8 * dpi);
+            line_paint.set_line_cap(vg::LineCap::Round);
+            canvas.stroke_path(&line_path, &line_paint);
         }
 
         // Text is rendered by the child Label via VIZIA's cosmic-text pipeline.

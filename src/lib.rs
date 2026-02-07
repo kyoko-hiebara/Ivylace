@@ -12,7 +12,7 @@ use dsp::oversampling::{MultibandOversampler, OversamplingFactor};
 use dsp::saturation::{MultibandSaturation, SaturationType};
 use dsp::spectrum::SpectrumBuffer;
 
-const NUM_BANDS: usize = 4;
+pub(crate) const NUM_BANDS: usize = 4;
 const BAND_NAMES: [&str; NUM_BANDS] = ["Low", "LowMid", "HighMid", "High"];
 
 /// GR meter update interval (every N samples) to reduce atomic store overhead
@@ -103,6 +103,8 @@ pub struct BandParams {
     pub enabled: BoolParam,
     #[id = "solo"]
     pub solo: BoolParam,
+    #[id = "link"]
+    pub link: BoolParam,
 }
 
 #[derive(Params)]
@@ -236,6 +238,8 @@ fn make_band_params(band_idx: usize) -> BandParams {
         enabled: BoolParam::new(format!("{name} Comp Enabled"), true),
 
         solo: BoolParam::new(format!("{name} Solo"), false),
+
+        link: BoolParam::new(format!("{name} Link"), false),
     }
 }
 

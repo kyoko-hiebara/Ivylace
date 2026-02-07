@@ -1,6 +1,8 @@
 /// Per-band control strip layout.
 /// Composes: GR Meter, Threshold knob, Ratio/Attack/Release segmented,
-/// Makeup knob, SC HPF knob, Saturation section, IN/Solo toggles.
+/// Makeup knob, SC HPF knob, Saturation section, LINK/IN/Solo toggles.
+use std::sync::Arc;
+
 use nih_plug_vizia::vizia::prelude::*;
 
 use super::knob::{GlassKnob, KnobSize};
@@ -9,11 +11,12 @@ use super::segmented::SegmentedParam;
 use super::toggle::{ToggleButton, ToggleVariant};
 use super::theme;
 use super::Data;
+use crate::IvylaceParams;
 
 pub struct BandStrip;
 
 impl BandStrip {
-    pub fn new(cx: &mut Context, band_idx: usize) -> Handle<'_, Self> {
+    pub fn new(cx: &mut Context, band_idx: usize, all_params: Arc<IvylaceParams>) -> Handle<'_, Self> {
         let color = theme::band_color(band_idx);
         let vizia_color: Color = Color::rgba(
             (color.r * 255.0) as u8,
@@ -50,14 +53,16 @@ impl BandStrip {
                         .right(Stretch(1.0));
                 }
 
-                // ── Threshold knob (medium size to save space) ──
-                GlassKnob::new(
+                // ── Threshold knob (medium size, with link support) ──
+                GlassKnob::new_with_link(
                     cx,
                     Data::params,
                     move |p| &p.bands[band_idx].threshold,
                     KnobSize::Md,
                     color,
                     "Threshold",
+                    all_params.clone(),
+                    band_idx,
                 )
                 .left(Stretch(1.0))
                 .right(Stretch(1.0));
@@ -110,6 +115,8 @@ impl BandStrip {
                 .col_between(Pixels(2.0))
                 .child_left(Stretch(1.0))
                 .child_right(Stretch(1.0))
+                .child_top(Stretch(1.0))
+                .child_bottom(Stretch(1.0))
                 .width(Stretch(1.0));
 
                 // ── Saturation section ──
@@ -159,23 +166,33 @@ impl BandStrip {
                 .border_radius(Pixels(6.0))
                 .width(Stretch(1.0));
 
-                // ── Footer: IN / Solo toggles (with top divider) ──
+                // ── Footer: LINK / IN / Solo toggles (with top divider) ──
                 HStack::new(cx, |cx| {
                     ToggleButton::new(
                         cx,
                         Data::params,
-                        move |p| &p.bands[band_idx].enabled,
-                        "IN",
+                        move |p| &p.bands[band_idx].link,
+                        "LINK",
                         ToggleVariant::Normal,
-                        color,
+                        theme::accent(),
                     )
                     .width(Stretch(1.0));
 
                     ToggleButton::new(
                         cx,
                         Data::params,
+                        move |p| &p.bands[band_idx].enabled,
+                        "",
+                        ToggleVariant::Power,
+                        color,
+                    )
+                    .width(Pixels(30.0));
+
+                    ToggleButton::new(
+                        cx,
+                        Data::params,
                         move |p| &p.bands[band_idx].solo,
-                        "S",
+                        "SOLO",
                         ToggleVariant::Solo,
                         theme::solo_color(),
                     )
@@ -191,6 +208,8 @@ impl BandStrip {
                 .width(Stretch(1.0));
             })
             .row_between(Pixels(1.0))
+            .child_top(Stretch(1.0))
+            .child_bottom(Stretch(1.0))
             .width(Stretch(1.0))
             .height(Stretch(1.0));
         })

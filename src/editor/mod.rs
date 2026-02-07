@@ -61,8 +61,9 @@ pub(crate) fn create(
             crossover::CrossoverDisplay::new(cx);
 
             HStack::new(cx, |cx| {
+                let p = Data::params.get(cx);
                 for i in 0..4 {
-                    band_strip::BandStrip::new(cx, i);
+                    band_strip::BandStrip::new(cx, i, p.clone());
                 }
             })
             .height(Stretch(1.0))
