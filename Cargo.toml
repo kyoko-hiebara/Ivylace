@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["xtask"]
+
+[package]
+name = "ivylace"
+version = "0.4.1"
+edition = "2021"
+authors = ["きょーこ"]
+description = "Multiband glue compressor with per-band analog saturation"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+
+[profile.release]
+lto = "thin"
+strip = false
+debug = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

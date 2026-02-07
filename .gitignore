@@ -1,0 +1,23 @@
+# Build artifacts
+/target/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code local settings
+.claude/
+
+# DAW crash logs
+*.ips
+Cubase*.txt
+
+# Figma reference UI (not part of the plugin)
+/ui_from_figma/
