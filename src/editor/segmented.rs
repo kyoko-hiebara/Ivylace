@@ -1,11 +1,21 @@
 /// Segmented control widget for stepped EnumParam parameters.
 /// Used for Ratio, Attack, Release selectors, and header controls.
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 
-use super::theme;
+use super::theme::{self, ThemeMode};
+use super::Data;
+
+fn mode_lens() -> impl Lens<Target = ThemeMode> {
+    Data::params.map(|p| {
+        if p.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark }
+    })
+}
 
 /// A segmented parameter control that displays all enum variants as buttons.
 pub struct SegmentedParam;
@@ -16,6 +26,7 @@ impl SegmentedParam {
         params: L,
         params_to_param: FMap,
         label: Option<&str>,
+        glass_mode: Arc<AtomicBool>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone + Send + Sync,
@@ -28,7 +39,7 @@ impl SegmentedParam {
             if let Some(label_text) = label {
                 Label::new(cx, label_text)
                     .font_size(8.0)
-                    .color(Color::rgba(255, 255, 255, 100))
+                    .color(mode_lens().map(|m| theme::to_vizia(theme::text_dim(*m))))
                     .text_align(TextAlign::Center)
                     .width(Stretch(1.0))
                     .height(Pixels(11.0))
@@ -36,7 +47,8 @@ impl SegmentedParam {
             }
 
             // Container for the buttons
-            HStack::new(cx, |cx| {
+            let gm = glass_mode.clone();
+            HStack::new(cx, move |cx| {
                 let param_base_temp = ParamWidgetBase::new(cx, params.clone(), params_to_param);
                 let step_count = param_base_temp.step_count().unwrap_or(0);
                 if step_count == 0 {
@@ -55,13 +67,14 @@ impl SegmentedParam {
                         i,
                         step_count,
                         normalized,
+                        gm.clone(),
                     );
                 }
             })
             .height(Pixels(18.0))
             .width(Stretch(1.0))
-            .background_color(Color::rgba(255, 255, 255, 10))
-            .border_color(Color::rgba(255, 255, 255, 15))
+            .background_color(mode_lens().map(|m| theme::to_vizia(theme::seg_bg(*m))))
+            .border_color(mode_lens().map(|m| theme::to_vizia(theme::seg_border(*m))))
             .border_width(Pixels(1.0))
             .border_radius(Pixels(3.0));
         })
@@ -82,6 +95,7 @@ struct SegmentButton {
     step_index: usize,
     step_count: usize,
     normalized_value: f32,
+    glass_mode: Arc<AtomicBool>,
     /// Whether a gesture is currently in progress (begin_set called, end_set pending)
     gesture_active: bool,
 }
@@ -95,6 +109,7 @@ impl SegmentButton {
         step_index: usize,
         step_count: usize,
         normalized_value: f32,
+        glass_mode: Arc<AtomicBool>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone + Send + Sync,
@@ -104,23 +119,22 @@ impl SegmentButton {
     {
         let param_base = ParamWidgetBase::new(cx, params.clone(), params_to_param);
 
-        let is_active_lens = ParamWidgetBase::make_lens(
+        let gm_text = glass_mode.clone();
+        let text_color_lens = ParamWidgetBase::make_lens(
             params.clone(),
             params_to_param,
             move |param| {
                 let current = param.unmodulated_normalized_value();
                 let current_step = (current * step_count as f32).round() as usize;
-                current_step == step_index
+                let is_active = current_step == step_index;
+                let mode = if gm_text.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
+                if is_active {
+                    theme::to_vizia(theme::seg_active_text(mode))
+                } else {
+                    theme::to_vizia(theme::seg_inactive_text(mode))
+                }
             },
         );
-
-        let text_color_lens = is_active_lens.map(|&is_active| {
-            if is_active {
-                Color::rgba(255, 255, 255, 242)
-            } else {
-                Color::rgba(255, 255, 255, 89)
-            }
-        });
 
         let label_owned = label.to_string();
 
@@ -129,6 +143,7 @@ impl SegmentButton {
             step_index,
             step_count,
             normalized_value,
+            glass_mode,
             gesture_active: false,
         }
         .build(cx, move |cx| {
@@ -191,6 +206,7 @@ impl View for SegmentButton {
             return;
         }
 
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
         let dpi = cx.scale_factor();
 
         let current_normalized = self.param_base.unmodulated_normalized_value();
@@ -204,7 +220,7 @@ impl View for SegmentButton {
                 bounds.w - 2.0, bounds.h - 2.0,
                 2.0 * dpi,
             );
-            canvas.fill_path(&path, &vg::Paint::color(theme::seg_active_bg()));
+            canvas.fill_path(&path, &vg::Paint::color(theme::seg_active_bg(mode)));
         }
     }
 }

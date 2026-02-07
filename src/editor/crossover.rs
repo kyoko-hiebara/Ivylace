@@ -1,10 +1,13 @@
 /// Crossover frequency display with draggable handles.
 /// Log-scale frequency axis, band color fills, grid lines.
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 
-use super::theme;
+use super::theme::{self, ThemeMode};
 use super::Data;
 
 const DISPLAY_HEIGHT: f32 = 72.0;
@@ -37,6 +40,7 @@ pub struct CrossoverDisplay {
     low_base: ParamWidgetBase,
     mid_base: ParamWidgetBase,
     high_base: ParamWidgetBase,
+    glass_mode: Arc<AtomicBool>,
     drag_handle: Option<usize>, // 0=low, 1=mid, 2=high
     hover_handle: Option<usize>,
     /// Handle index for a pending reset gesture (double-click).
@@ -45,7 +49,7 @@ pub struct CrossoverDisplay {
 }
 
 impl CrossoverDisplay {
-    pub fn new(cx: &mut Context) -> Handle<'_, Self> {
+    pub fn new(cx: &mut Context, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self> {
         let low_base = ParamWidgetBase::new(cx, Data::params, |p| &p.xover_low);
         let mid_base = ParamWidgetBase::new(cx, Data::params, |p| &p.xover_mid);
         let high_base = ParamWidgetBase::new(cx, Data::params, |p| &p.xover_high);
@@ -54,6 +58,7 @@ impl CrossoverDisplay {
             low_base,
             mid_base,
             high_base,
+            glass_mode,
             drag_handle: None,
             hover_handle: None,
             reset_handle: None,
@@ -96,6 +101,7 @@ impl View for CrossoverDisplay {
             return;
         }
 
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
         let dpi = cx.scale_factor();
         let bx = bounds.x;
         let by = bounds.y;
@@ -113,7 +119,7 @@ impl View for CrossoverDisplay {
         {
             let mut path = vg::Path::new();
             path.rect(bx, by, bw, bh);
-            canvas.fill_path(&path, &vg::Paint::color(theme::xover_bg()));
+            canvas.fill_path(&path, &vg::Paint::color(theme::xover_bg(mode)));
         }
 
         // ── Band fills ──
@@ -129,7 +135,7 @@ impl View for CrossoverDisplay {
                 if end <= start {
                     continue;
                 }
-                let color = theme::band_color(i);
+                let color = theme::band_color(i, mode);
                 let mut path = vg::Path::new();
                 path.rect(bx + start, by, end - start, bh);
                 let paint = vg::Paint::linear_gradient(
@@ -149,13 +155,13 @@ impl View for CrossoverDisplay {
                 let mut path = vg::Path::new();
                 path.move_to(gx, by);
                 path.line_to(gx, by + bh);
-                let mut paint = vg::Paint::color(theme::xover_grid());
+                let mut paint = vg::Paint::color(theme::xover_grid(mode));
                 paint.set_line_width(1.0);
                 canvas.stroke_path(&path, &paint);
 
                 // Label
                 let label = format_freq(freq);
-                let mut text_paint = vg::Paint::color(theme::xover_grid_text());
+                let mut text_paint = vg::Paint::color(theme::xover_grid_text(mode));
                 text_paint.set_font_size(7.0 * dpi);
                 text_paint.set_text_align(vg::Align::Center);
                 text_paint.set_text_baseline(vg::Baseline::Bottom);
@@ -177,7 +183,7 @@ impl View for CrossoverDisplay {
                     continue;
                 }
                 let center_x = bx + (start + end) * 0.5;
-                let color = theme::band_color(i);
+                let color = theme::band_color(i, mode);
                 let mut paint = vg::Paint::color(theme::with_alpha(color, 0.25));
                 paint.set_font_size(10.0 * dpi);
                 paint.set_text_align(vg::Align::Center);
@@ -189,9 +195,9 @@ impl View for CrossoverDisplay {
         // ── Crossover handles ──
         {
             let handle_colors = [
-                theme::band_color(0), // Low handle uses low band color
-                theme::band_color(1), // Mid handle
-                theme::band_color(2), // High handle
+                theme::band_color(0, mode), // Low handle uses low band color
+                theme::band_color(1, mode), // Mid handle
+                theme::band_color(2, mode), // High handle
             ];
 
             for (i, &hx) in xover_positions.iter().enumerate() {
@@ -232,9 +238,9 @@ impl View for CrossoverDisplay {
                         bx + hx - label_w * 0.5, by + 20.0,
                         label_w, label_h, 4.0,
                     );
-                    canvas.fill_path(&bg_path, &vg::Paint::color(theme::xover_handle_label_bg()));
+                    canvas.fill_path(&bg_path, &vg::Paint::color(theme::xover_handle_label_bg(mode)));
 
-                    let mut text_paint = vg::Paint::color(theme::text_primary());
+                    let mut text_paint = vg::Paint::color(theme::text_primary(mode));
                     text_paint.set_font_size(9.0 * dpi);
                     text_paint.set_text_align(vg::Align::Center);
                     text_paint.set_text_baseline(vg::Baseline::Middle);
@@ -248,7 +254,7 @@ impl View for CrossoverDisplay {
             let mut path = vg::Path::new();
             path.move_to(bx, by + bh);
             path.line_to(bx + bw, by + bh);
-            let mut paint = vg::Paint::color(theme::xover_border());
+            let mut paint = vg::Paint::color(theme::xover_border(mode));
             paint.set_line_width(1.0);
             canvas.stroke_path(&path, &paint);
         }

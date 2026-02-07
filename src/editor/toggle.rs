@@ -1,11 +1,14 @@
 /// Toggle button widget for BoolParam.
 /// Variants: Normal (band color), Solo (yellow), Sat (amber).
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 
-use super::theme;
+use super::theme::{self, ThemeMode};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ToggleVariant {
@@ -19,6 +22,7 @@ pub struct ToggleButton {
     param_base: ParamWidgetBase,
     variant: ToggleVariant,
     color: vg::Color,
+    glass_mode: Arc<AtomicBool>,
     /// Whether a gesture is currently in progress (begin_set called, end_set pending)
     gesture_active: bool,
 }
@@ -31,6 +35,7 @@ impl ToggleButton {
         label: &str,
         variant: ToggleVariant,
         color: vg::Color,
+        glass_mode: Arc<AtomicBool>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone,
@@ -50,6 +55,7 @@ impl ToggleButton {
             param_base,
             variant,
             color,
+            glass_mode,
             gesture_active: false,
         }
         .build(cx, |cx| {
@@ -80,6 +86,7 @@ impl View for ToggleButton {
             return;
         }
 
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
         let dpi = cx.scale_factor();
         let active = self.param_base.unmodulated_normalized_value() > 0.5;
 
@@ -118,9 +125,9 @@ impl View for ToggleButton {
                 glow_path.rect(bounds.x - 8.0, bounds.y - 8.0, bounds.w + 16.0, bounds.h + 16.0);
                 canvas.fill_path(&glow_path, &glow);
             } else {
-                canvas.fill_path(&path, &vg::Paint::color(theme::toggle_off_bg()));
+                canvas.fill_path(&path, &vg::Paint::color(theme::toggle_off_bg(mode)));
 
-                let mut border_paint = vg::Paint::color(theme::toggle_off_border());
+                let mut border_paint = vg::Paint::color(theme::toggle_off_border(mode));
                 border_paint.set_line_width(1.0 * dpi);
                 canvas.stroke_path(&path, &border_paint);
             }
@@ -133,9 +140,9 @@ impl View for ToggleButton {
             let r = 6.0 * dpi;
 
             let icon_color = if active {
-                vg::Color::rgba(255, 255, 255, 240)
+                theme::toggle_power_active(mode)
             } else {
-                vg::Color::rgba(255, 255, 255, 140)
+                theme::toggle_power_inactive(mode)
             };
 
             // Arc (270° open at top)

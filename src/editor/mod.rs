@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
@@ -18,6 +19,7 @@ mod toggle;
 mod band_strip;
 mod header;
 mod spectrum;
+mod about;
 
 // ── Data Model (shared between audio and GUI via lenses) ─────
 
@@ -55,10 +57,24 @@ pub(crate) fn create(
         .build(cx);
 
         // ── Full GUI: Header + Crossover + 4 Band Strips ──
+        let bg_color_lens = Data::params.map(|p| {
+            let mode = if p.glass_mode.load(Ordering::Relaxed) {
+                theme::ThemeMode::Glass
+            } else {
+                theme::ThemeMode::Dark
+            };
+            theme::to_vizia(theme::page_bg(mode))
+        });
+
+        let about_visible = Arc::new(AtomicBool::new(false));
+
         VStack::new(cx, |cx| {
-            build_title_bar(cx);
-            header::Header::new(cx);
-            crossover::CrossoverDisplay::new(cx);
+            let p = Data::params.get(cx);
+            let glass_mode = p.glass_mode.clone();
+
+            build_title_bar(cx, about_visible.clone());
+            header::Header::new(cx, glass_mode.clone());
+            crossover::CrossoverDisplay::new(cx, glass_mode.clone());
 
             HStack::new(cx, |cx| {
                 let p = Data::params.get(cx);
@@ -68,8 +84,11 @@ pub(crate) fn create(
             })
             .height(Stretch(1.0))
             .width(Stretch(1.0));
+
+            // About dialog overlay (rendered last → on top of everything)
+            about::AboutDialog::new(cx, about_visible.clone(), glass_mode.clone());
         })
-        .background_color(Color::rgb(0x0A, 0x0A, 0x1A))
+        .background_color(bg_color_lens)
         .width(Stretch(1.0))
         .height(Stretch(1.0));
 
@@ -79,21 +98,68 @@ pub(crate) fn create(
 
 // ── Title Bar ────────────────────────────────────────────────
 
-fn build_title_bar(cx: &mut Context) {
-    HStack::new(cx, |cx| {
-        Label::new(cx, &format!("Ivylace v{}", env!("CARGO_PKG_VERSION")))
-            .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
-            .font_size(10.0)
-            .font_weight(FontWeightKeyword::Medium)
-            .color(Color::rgba(255, 255, 255, 100))
-            .text_align(TextAlign::Center)
+fn build_title_bar(cx: &mut Context, about_visible: Arc<AtomicBool>) {
+    let border_lens = Data::params.map(|p| {
+        let mode = if p.glass_mode.load(Ordering::Relaxed) { theme::ThemeMode::Glass } else { theme::ThemeMode::Dark };
+        theme::to_vizia(theme::title_bar_border(mode))
+    });
+
+    HStack::new(cx, move |cx| {
+        TitleBarLabel::new(cx, about_visible.clone())
             .width(Stretch(1.0))
             .child_top(Stretch(1.0))
             .child_bottom(Stretch(1.0));
     })
     .height(Pixels(28.0))
-    .border_color(Color::rgba(255, 255, 255, 13))
+    .border_color(border_lens)
     .border_width(Pixels(1.0))
     .child_top(Stretch(1.0))
     .child_bottom(Stretch(1.0));
+}
+
+// ── Clickable Title Bar Label ───────────────────────────────
+
+struct TitleBarLabel {
+    about_visible: Arc<AtomicBool>,
+}
+
+impl TitleBarLabel {
+    fn new(cx: &mut Context, about_visible: Arc<AtomicBool>) -> Handle<'_, Self> {
+        let text_lens = Data::params.map(|p| {
+            let mode = if p.glass_mode.load(Ordering::Relaxed) { theme::ThemeMode::Glass } else { theme::ThemeMode::Dark };
+            theme::to_vizia(theme::title_bar_text(mode))
+        });
+
+        Self { about_visible }
+            .build(cx, |cx| {
+                Label::new(cx, &format!("Ivylace v{}", env!("CARGO_PKG_VERSION")))
+                    .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                    .font_size(10.0)
+                    .font_weight(FontWeightKeyword::Medium)
+                    .color(text_lens)
+                    .text_align(TextAlign::Center)
+                    .width(Stretch(1.0))
+                    .hoverable(false);
+            })
+            .cursor(CursorIcon::Hand)
+            .height(Stretch(1.0))
+    }
+}
+
+impl View for TitleBarLabel {
+    fn element(&self) -> Option<&'static str> {
+        Some("title-bar-label")
+    }
+
+    fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
+        event.map(|window_event, meta| {
+            if let WindowEvent::MouseDown(MouseButton::Left) = window_event {
+                // Toggle about dialog visibility
+                let current = self.about_visible.load(Ordering::Relaxed);
+                self.about_visible.store(!current, Ordering::Relaxed);
+                cx.needs_redraw();
+                meta.consume();
+            }
+        });
+    }
 }

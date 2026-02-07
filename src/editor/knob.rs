@@ -3,6 +3,7 @@
 /// Optional threshold linking: when `link_params` is set, dragging propagates
 /// delta changes to other linked bands' thresholds.
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
@@ -11,8 +12,15 @@ use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 use nih_plug_vizia::widgets::util::ModifiersExt;
 use nih_plug_vizia::widgets::RawParamEvent;
 
-use super::theme;
+use super::theme::{self, ThemeMode};
+use super::Data;
 use crate::IvylaceParams;
+
+fn mode_lens() -> impl Lens<Target = ThemeMode> {
+    Data::params.map(|p| {
+        if p.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark }
+    })
+}
 
 /// Knob sizes matching Figma spec
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,6 +71,7 @@ pub struct GlassKnob {
     param_base: ParamWidgetBase,
     size: KnobSize,
     color: vg::Color,
+    glass_mode: Arc<AtomicBool>,
 
     drag_active: bool,
     granular_drag_status: Option<GranularDragStatus>,
@@ -89,6 +98,7 @@ impl GlassKnob {
         size: KnobSize,
         color: vg::Color,
         label: &str,
+        glass_mode: Arc<AtomicBool>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone,
@@ -102,6 +112,7 @@ impl GlassKnob {
             param_base,
             size,
             color,
+            glass_mode,
             drag_active: false,
             granular_drag_status: None,
             reset_gesture_active: false,
@@ -127,6 +138,7 @@ impl GlassKnob {
         label: &str,
         all_params: Arc<IvylaceParams>,
         band_idx: usize,
+        glass_mode: Arc<AtomicBool>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone,
@@ -140,6 +152,7 @@ impl GlassKnob {
             param_base,
             size,
             color,
+            glass_mode,
             drag_active: false,
             granular_drag_status: None,
             reset_gesture_active: false,
@@ -181,7 +194,7 @@ impl GlassKnob {
             Label::new(cx, &label.to_uppercase())
                 .font_size(9.0)
                 .font_weight(FontWeightKeyword::Medium)
-                .color(Color::rgba(255, 255, 255, 128))
+                .color(mode_lens().map(|m| theme::to_vizia(theme::text_secondary(*m))))
                 .font_family(vec![FamilyOwned::Name(String::from(
                     nih_plug_vizia::assets::NOTO_SANS,
                 ))])
@@ -197,7 +210,7 @@ impl GlassKnob {
 
             Label::new(cx, display_lens)
                 .font_size(10.0)
-                .color(Color::rgba(255, 255, 255, 230))
+                .color(mode_lens().map(|m| theme::to_vizia(theme::text_primary(*m))))
                 .font_family(vec![FamilyOwned::Name(String::from(
                     nih_plug_vizia::assets::NOTO_SANS,
                 ))])
@@ -287,6 +300,7 @@ impl View for GlassKnob {
             return;
         }
 
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
         let dpi = cx.scale_factor();
         let outer = self.size.outer() * dpi;
         let inner = self.size.inner() * dpi;
@@ -309,7 +323,7 @@ impl View for GlassKnob {
         {
             let mut path = vg::Path::new();
             path.arc(cx_x, cy_y, arc_radius, start_angle, end_angle, vg::Solidity::Hole);
-            let mut paint = vg::Paint::color(theme::knob_track());
+            let mut paint = vg::Paint::color(theme::knob_track(mode));
             paint.set_line_width(2.5 * dpi);
             paint.set_line_cap(vg::LineCap::Round);
             canvas.stroke_path(&path, &paint);
@@ -344,13 +358,13 @@ impl View for GlassKnob {
                 cy_y - inner * 0.15,
                 inner * 0.1,
                 inner * 0.6,
-                theme::knob_body_light(),
-                theme::knob_body_dark(),
+                theme::knob_body_light(mode),
+                theme::knob_body_dark(mode),
             );
             canvas.fill_path(&path, &paint);
 
             // Border
-            let mut border_paint = vg::Paint::color(theme::knob_border());
+            let mut border_paint = vg::Paint::color(theme::knob_border(mode));
             border_paint.set_line_width(1.0 * dpi);
             canvas.stroke_path(&path, &border_paint);
         }

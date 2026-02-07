@@ -2,11 +2,13 @@
 /// Reads from SpectrumBuffer, computes FFT, renders log-frequency magnitude plot.
 /// Overlaid below the crossover display with matching frequency axis.
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::cell::RefCell;
 
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 
+use super::theme::{self, ThemeMode};
 use crate::dsp::spectrum::{self, FFT_SIZE, NUM_BINS, SpectrumBuffer};
 
 const FREQ_MIN: f32 = 20.0;
@@ -48,6 +50,7 @@ impl FftWorkBuffers {
 pub struct SpectrumAnalyzer {
     spectrum_buf: Arc<SpectrumBuffer>,
     sample_rate: f32,
+    glass_mode: Arc<AtomicBool>,
     /// Hann window (precomputed, heap-allocated)
     window: Box<[f32; FFT_SIZE]>,
     /// FFT work buffers (heap-allocated to avoid stack overflow)
@@ -59,12 +62,14 @@ impl SpectrumAnalyzer {
         cx: &mut Context,
         spectrum_buf: Arc<SpectrumBuffer>,
         sample_rate: f32,
+        glass_mode: Arc<AtomicBool>,
     ) -> Handle<'_, Self> {
         let window = spectrum::hann_window();
 
         Self {
             spectrum_buf,
             sample_rate,
+            glass_mode,
             window,
             work: RefCell::new(FftWorkBuffers::new()),
         }
@@ -85,6 +90,7 @@ impl View for SpectrumAnalyzer {
             return;
         }
 
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
         let dpi = cx.scale_factor();
         let bx = bounds.x;
         let by = bounds.y;
@@ -95,7 +101,7 @@ impl View for SpectrumAnalyzer {
         {
             let mut path = vg::Path::new();
             path.rect(bx, by, bw, bh);
-            canvas.fill_path(&path, &vg::Paint::color(vg::Color::rgba(0, 0, 0, 40)));
+            canvas.fill_path(&path, &vg::Paint::color(theme::spectrum_bg(mode)));
         }
 
         // Read samples and compute FFT using heap-allocated work buffers
@@ -175,13 +181,13 @@ impl View for SpectrumAnalyzer {
             let fill_paint = vg::Paint::linear_gradient(
                 bx, by,
                 bx, by + bh,
-                vg::Color::rgba(100, 180, 255, 25),
-                vg::Color::rgba(100, 180, 255, 5),
+                theme::spectrum_fill_top(mode),
+                theme::spectrum_fill_bottom(mode),
             );
             canvas.fill_path(&fill_path, &fill_paint);
 
             // Stroke line
-            let mut stroke_paint = vg::Paint::color(vg::Color::rgba(120, 200, 255, 100));
+            let mut stroke_paint = vg::Paint::color(theme::spectrum_stroke(mode));
             stroke_paint.set_line_width(1.5 * dpi);
             canvas.stroke_path(&stroke_path, &stroke_paint);
         }
@@ -191,7 +197,7 @@ impl View for SpectrumAnalyzer {
             let mut path = vg::Path::new();
             path.move_to(bx, by);
             path.line_to(bx + bw, by);
-            let mut paint = vg::Paint::color(vg::Color::rgba(255, 255, 255, 10));
+            let mut paint = vg::Paint::color(theme::spectrum_top_border(mode));
             paint.set_line_width(1.0);
             canvas.stroke_path(&path, &paint);
         }

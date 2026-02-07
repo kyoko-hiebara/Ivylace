@@ -2,6 +2,7 @@ use nih_plug::prelude::*;
 use nih_plug::formatters;
 use nih_plug_vizia::ViziaState;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 mod dsp;
 mod editor;
@@ -49,6 +50,10 @@ pub struct IvylaceParams {
     /// Editor state (window size/scale persistence)
     #[persist = "editor-state"]
     pub(crate) editor_state: Arc<ViziaState>,
+
+    /// Glass theme mode (persisted but not a DAW parameter)
+    #[persist = "glass-mode"]
+    pub(crate) glass_mode: Arc<AtomicBool>,
 
     // --- Global ---
     #[id = "input_gain"]
@@ -272,6 +277,7 @@ impl Default for Ivylace {
         Self {
             params: Arc::new(IvylaceParams {
                 editor_state: editor::default_state(),
+                glass_mode: Arc::new(AtomicBool::new(false)),
 
                 input_gain: FloatParam::new(
                     "Input Gain",

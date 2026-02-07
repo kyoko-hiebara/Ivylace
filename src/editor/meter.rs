@@ -1,12 +1,21 @@
 /// Vertical segmented Gain Reduction meter widget.
 /// Reads from Arc<GrMeterOutputs> via lenses for lock-free display.
 use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 
-use super::theme;
+use super::theme::{self, ThemeMode};
+use super::Data;
+
+fn mode_lens() -> impl Lens<Target = ThemeMode> {
+    Data::params.map(|p| {
+        if p.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark }
+    })
+}
 
 const METER_WIDTH: f32 = 18.0;
 const METER_HEIGHT: f32 = 60.0;
@@ -19,13 +28,14 @@ const SCALE_MARKS: [f32; 5] = [0.0, -6.0, -12.0, -20.0, -30.0];
 pub struct GrMeterWidget<L: Lens<Target = f32>, P: Lens<Target = f32>> {
     level_lens: L,
     peak_lens: P,
+    glass_mode: Arc<AtomicBool>,
     /// Held peak value for the display
     held_peak: Cell<f32>,
     held_peak_time: Cell<Option<Instant>>,
 }
 
 impl<L: Lens<Target = f32>, P: Lens<Target = f32>> GrMeterWidget<L, P> {
-    pub fn new(cx: &mut Context, level_lens: L, peak_lens: P) -> Handle<'_, Self>
+    pub fn new(cx: &mut Context, level_lens: L, peak_lens: P, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self>
     where
         L: Clone + 'static,
         P: Clone + 'static,
@@ -41,6 +51,7 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> GrMeterWidget<L, P> {
         Self {
             level_lens,
             peak_lens,
+            glass_mode,
             held_peak: Cell::new(0.0),
             held_peak_time: Cell::new(None),
         }
@@ -56,7 +67,7 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> GrMeterWidget<L, P> {
                 // Value readout (e.g., "-3.2" or "0.0")
                 Label::new(cx, gr_text_lens)
                     .font_size(9.0)
-                    .color(Color::rgba(255, 255, 255, 200))
+                    .color(mode_lens().map(|m| theme::to_vizia(theme::meter_readout_text(*m))))
                     .font_family(vec![FamilyOwned::Name(String::from(nih_plug_vizia::assets::NOTO_SANS))])
                     .text_align(TextAlign::Center)
                     .width(Stretch(1.0))
@@ -67,7 +78,7 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> GrMeterWidget<L, P> {
                 Label::new(cx, "GR")
                     .font_size(8.0)
                     .font_weight(FontWeightKeyword::SemiBold)
-                    .color(Color::rgba(255, 255, 255, 100))
+                    .color(mode_lens().map(|m| theme::to_vizia(theme::meter_gr_label(*m))))
                     .font_family(vec![FamilyOwned::Name(String::from(nih_plug_vizia::assets::NOTO_SANS))])
                     .text_align(TextAlign::Center)
                     .width(Stretch(1.0))
@@ -94,6 +105,7 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
             return;
         }
 
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
         let dpi = cx.scale_factor();
         let _opacity = cx.opacity();
 
@@ -129,18 +141,18 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
         {
             let mut path = vg::Path::new();
             path.rounded_rect(mx, my, mw, mh, 4.0 * dpi);
-            canvas.fill_path(&path, &vg::Paint::color(theme::meter_bg()));
+            canvas.fill_path(&path, &vg::Paint::color(theme::meter_bg(mode)));
 
             // Inset shadow
             let shadow = vg::Paint::box_gradient(
                 mx, my + 1.0 * dpi, mw, mh, 4.0 * dpi, 4.0 * dpi,
-                vg::Color::rgba(0, 0, 0, 80),
+                theme::meter_shadow(mode),
                 vg::Color::rgba(0, 0, 0, 0),
             );
             canvas.fill_path(&path, &shadow);
 
             // Border
-            let mut border_paint = vg::Paint::color(theme::meter_border());
+            let mut border_paint = vg::Paint::color(theme::meter_border(mode));
             border_paint.set_line_width(1.0 * dpi);
             canvas.stroke_path(&path, &border_paint);
         }
@@ -153,7 +165,7 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
                 let mut path = vg::Path::new();
                 path.move_to(mx + 1.0, sy);
                 path.line_to(mx + mw - 1.0, sy);
-                let mut paint = vg::Paint::color(theme::meter_seg_line());
+                let mut paint = vg::Paint::color(theme::meter_seg_line(mode));
                 paint.set_line_width(1.0 * dpi);
                 canvas.stroke_path(&path, &paint);
             }
@@ -175,15 +187,15 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
                 vg::Paint::linear_gradient(
                     mx, my,
                     mx, my + fill_h,
-                    theme::meter_fill_red(),
-                    theme::meter_fill_blue(),
+                    theme::meter_fill_red(mode),
+                    theme::meter_fill_blue(mode),
                 )
             } else {
                 vg::Paint::linear_gradient(
                     mx, my,
                     mx, my + fill_h,
-                    theme::meter_fill_blue(),
-                    vg::Color::rgb(0x66, 0xBB, 0xFF),
+                    theme::meter_fill_blue(mode),
+                    theme::meter_fill_blue_light(mode),
                 )
             };
             canvas.fill_path(&path, &paint);
@@ -198,7 +210,7 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
                 let mut path = vg::Path::new();
                 path.move_to(mx + 1.0, peak_y);
                 path.line_to(mx + mw - 1.0, peak_y);
-                let mut paint = vg::Paint::color(theme::meter_peak());
+                let mut paint = vg::Paint::color(theme::meter_peak(mode));
                 paint.set_line_width(2.0 * dpi);
                 canvas.stroke_path(&path, &paint);
             }
@@ -212,7 +224,7 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
                 let mut path = vg::Path::new();
                 path.move_to(mx + mw - 4.0 * dpi, mark_y);
                 path.line_to(mx + mw - 1.0, mark_y);
-                let mut paint = vg::Paint::color(theme::meter_scale());
+                let mut paint = vg::Paint::color(theme::meter_scale(mode));
                 paint.set_line_width(1.0 * dpi);
                 canvas.stroke_path(&path, &paint);
             }
