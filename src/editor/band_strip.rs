@@ -26,7 +26,6 @@ impl BandStrip {
         );
 
         Self.build(cx, |cx| {
-            // Scrollable VStack to handle overflow gracefully
             VStack::new(cx, |cx| {
                 // ── Top accent line ──
                 Element::new(cx)
@@ -41,10 +40,9 @@ impl BandStrip {
                     .color(vizia_color)
                     .text_align(TextAlign::Center)
                     .width(Stretch(1.0))
-                    .height(Pixels(18.0))
-                    .top(Pixels(2.0));
+                    .height(Pixels(20.0));
 
-                // ── GR Meter (compact) ──
+                // ── GR Meter ──
                 {
                     let level_lens = Data::gr_outputs.map(move |o| o.band_gr[band_idx].load());
                     let peak_lens = Data::gr_outputs.map(move |o| o.band_peak_gr[band_idx].load());
@@ -53,7 +51,7 @@ impl BandStrip {
                         .right(Stretch(1.0));
                 }
 
-                // ── Threshold knob (medium size, with link support) ──
+                // ── Threshold knob ──
                 GlassKnob::new_with_link(
                     cx,
                     Data::params,
@@ -67,7 +65,7 @@ impl BandStrip {
                 .left(Stretch(1.0))
                 .right(Stretch(1.0));
 
-                // ── Ratio / Attack / Release segmented controls ──
+                // ── Ratio / Attack / Release (grouped) ──
                 VStack::new(cx, |cx| {
                     SegmentedParam::new(
                         cx,
@@ -79,21 +77,21 @@ impl BandStrip {
                         cx,
                         Data::params,
                         move |p| &p.bands[band_idx].attack,
-                        Some("ATTACK (ms)"),
+                        Some("ATTACK"),
                     );
                     SegmentedParam::new(
                         cx,
                         Data::params,
                         move |p| &p.bands[band_idx].release,
-                        Some("RELEASE (ms)"),
+                        Some("RELEASE"),
                     );
                 })
-                .row_between(Pixels(2.0))
+                .row_between(Pixels(15.0))
                 .left(Pixels(3.0))
                 .right(Pixels(3.0))
                 .width(Stretch(1.0));
 
-                // ── Makeup + SC HPF (both small) ──
+                // ── Makeup + SC HPF ──
                 HStack::new(cx, |cx| {
                     GlassKnob::new(
                         cx,
@@ -115,8 +113,7 @@ impl BandStrip {
                 .col_between(Pixels(2.0))
                 .child_left(Stretch(1.0))
                 .child_right(Stretch(1.0))
-                .child_top(Stretch(1.0))
-                .child_bottom(Stretch(1.0))
+                .top(Pixels(24.0))
                 .width(Stretch(1.0));
 
                 // ── Saturation section ──
@@ -153,20 +150,22 @@ impl BandStrip {
                     .col_between(Pixels(4.0))
                     .child_left(Stretch(1.0))
                     .child_right(Stretch(1.0))
+                    .height(Auto)
                     .width(Stretch(1.0));
                 })
-                .row_between(Pixels(2.0))
+                .row_between(Pixels(4.0))
                 .left(Pixels(4.0))
                 .right(Pixels(4.0))
                 .top(Pixels(4.0))
-                .bottom(Pixels(4.0))
+                .bottom(Pixels(8.0))
+                .height(Auto)
                 .background_color(Color::rgba(255, 255, 255, 8))
                 .border_color(Color::rgba(255, 255, 255, 15))
                 .border_width(Pixels(1.0))
                 .border_radius(Pixels(6.0))
                 .width(Stretch(1.0));
 
-                // ── Footer: LINK / IN / Solo toggles (with top divider) ──
+                // ── Footer: LINK / Power / Solo ──
                 HStack::new(cx, |cx| {
                     ToggleButton::new(
                         cx,
@@ -198,18 +197,14 @@ impl BandStrip {
                     )
                     .width(Stretch(1.0));
                 })
-                .col_between(Pixels(4.0))
+                .col_between(Pixels(3.0))
                 .left(Pixels(4.0))
                 .right(Pixels(4.0))
-                .top(Pixels(4.0))
-                .bottom(Pixels(4.0))
-                .border_color(Color::rgba(255, 255, 255, 13))
-                .border_width(Pixels(1.0))
+                .top(Pixels(6.0))
+                .bottom(Pixels(10.0))
                 .width(Stretch(1.0));
             })
-            .row_between(Pixels(1.0))
-            .child_top(Stretch(1.0))
-            .child_bottom(Stretch(1.0))
+            .row_between(Pixels(10.0))
             .width(Stretch(1.0))
             .height(Stretch(1.0));
         })

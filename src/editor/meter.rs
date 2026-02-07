@@ -45,12 +45,22 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> GrMeterWidget<L, P> {
             held_peak_time: Cell::new(None),
         }
         .build(cx, move |cx| {
-            // VStack: meter bar → "GR" label → value readout
+            // VStack: meter bar → value readout → "GR" label
             VStack::new(cx, |cx| {
                 // Spacer for the meter bar area (drawn by View::draw)
                 Element::new(cx)
                     .width(Pixels(METER_WIDTH))
                     .height(Pixels(METER_HEIGHT))
+                    .hoverable(false);
+
+                // Value readout (e.g., "-3.2" or "0.0")
+                Label::new(cx, gr_text_lens)
+                    .font_size(9.0)
+                    .color(Color::rgba(255, 255, 255, 200))
+                    .font_family(vec![FamilyOwned::Name(String::from(nih_plug_vizia::assets::NOTO_SANS))])
+                    .text_align(TextAlign::Center)
+                    .width(Stretch(1.0))
+                    .height(Pixels(12.0))
                     .hoverable(false);
 
                 // "GR" label
@@ -62,16 +72,6 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> GrMeterWidget<L, P> {
                     .text_align(TextAlign::Center)
                     .width(Stretch(1.0))
                     .height(Pixels(11.0))
-                    .hoverable(false);
-
-                // Value readout (e.g., "-3.2" or "0.0")
-                Label::new(cx, gr_text_lens)
-                    .font_size(9.0)
-                    .color(Color::rgba(255, 255, 255, 200))
-                    .font_family(vec![FamilyOwned::Name(String::from(nih_plug_vizia::assets::NOTO_SANS))])
-                    .text_align(TextAlign::Center)
-                    .width(Stretch(1.0))
-                    .height(Pixels(12.0))
                     .hoverable(false);
             })
             .row_between(Pixels(1.0))

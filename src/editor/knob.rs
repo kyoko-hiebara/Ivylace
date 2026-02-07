@@ -206,7 +206,7 @@ impl GlassKnob {
                 .height(Pixels(14.0))
                 .hoverable(false);
         })
-        .row_between(Pixels(1.0))
+        .row_between(Pixels(2.0))
         .width(Stretch(1.0))
         .height(Auto);
     }
