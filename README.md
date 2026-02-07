@@ -14,6 +14,7 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 - **Sidechain HPF** per band (the key to "glue" compression)
 - **Soft knee** that adapts to ratio setting
 - **Parallel compression** via per-band mix control
+- **Band threshold linking**
 
 ### 4-Band Crossover
 - **Linkwitz-Riley 4th order (LR4, 24dB/oct)** for phase-coherent band splitting
@@ -21,6 +22,7 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
   - Low: 20-500 Hz (default: 120 Hz)
   - Mid: 200-5000 Hz (default: 1500 Hz)
   - High: 2000-18000 Hz (default: 8000 Hz)
+- Draggable crossover handles in GUI
 
 ### Analog Saturation
 - **Three saturation models:**
@@ -30,6 +32,13 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 - **Per-band drive control** with auto-gain compensation
 - **Low band bypass by default** — keeps sub-bass clean for EDM production
 - DC blocker on each band to prevent DC offset from asymmetric clipping
+- **2x/4x oversampling** for anti-aliased saturation
+
+### GUI
+- **Dark / Glass dual theme** — switchable via header toggle, persisted per session
+- **Custom GPU-rendered widgets** — glassmorphism knobs, GR meters, crossover display
+- **About dialog** — click title bar to view logo, version, and author info
+- **Resizable window** (960 x 740 default)
 
 ### Band Layout
 | Band | Range | Default Saturation |
@@ -44,7 +53,7 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 ```
 Input → Input Gain
   → LR4 Crossover (4 bands)
-  → [Per Band] → Compressor → Saturation
+  → [Per Band] → Compressor → Saturation (oversampled)
   → Sum bands
   → Dry/Wet Mix
   → Output Gain
@@ -71,23 +80,26 @@ src/
 ├── lib.rs                  # Plugin entry point, parameters, process()
 ├── editor/                 # VIZIA GUI (custom widgets, femtovg drawing)
 │   ├── mod.rs              # Editor entry, Data lens model, title bar
-│   ├── theme.rs            # Color constants
+│   ├── theme.rs            # ~40 color functions, Dark/Glass dual theme
 │   ├── knob.rs             # GlassKnob rotary control
 │   ├── meter.rs            # GR meter widget
 │   ├── crossover.rs        # Crossover frequency display
 │   ├── segmented.rs        # Stepped enum control
 │   ├── toggle.rs           # Toggle button (IN/Solo/SAT)
 │   ├── band_strip.rs       # Per-band strip layout
-│   ├── header.rs           # Global controls bar
-│   └── spectrum.rs         # Spectrum analyzer
-└── dsp/
-    ├── mod.rs
-    ├── crossover.rs        # LR4 4-band crossover
-    ├── compressor.rs       # SSL 4000G-style VCA compressor
-    ├── saturation.rs       # Per-band analog saturation
-    ├── oversampling.rs     # 2x/4x oversampling
-    ├── gr_meter.rs         # Gain reduction metering
-    └── spectrum.rs         # FFT + lock-free spectrum buffer
+│   ├── header.rs           # Global controls bar + theme toggle
+│   ├── spectrum.rs         # Spectrum analyzer
+│   └── about.rs            # About dialog overlay
+├── dsp/
+│   ├── mod.rs
+│   ├── crossover.rs        # LR4 4-band crossover
+│   ├── compressor.rs       # SSL 4000G-style VCA compressor
+│   ├── saturation.rs       # Per-band analog saturation
+│   ├── oversampling.rs     # 2x/4x oversampling
+│   ├── gr_meter.rs         # Gain reduction metering
+│   └── spectrum.rs         # FFT + lock-free spectrum buffer
+└── assets/
+    └── noto_sans_jp_kana.ttf  # Japanese font subset for About dialog
 ```
 
 ## License

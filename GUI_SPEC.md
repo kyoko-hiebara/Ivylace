@@ -1,7 +1,8 @@
 # Ivylace — GUI Implementation Spec
 
 > **Status**: Implemented with nih-plug VIZIA (native GPU-rendered)
-> **Window**: 920 x 660px, resizable
+> **Window**: 960 x 740px, resizable
+> **Theme**: Dark / Glass dual mode (persisted per session)
 
 ---
 
@@ -18,16 +19,20 @@
 
 ```
 src/editor/
-  mod.rs          -- Editor entry: create(), default_state(), Data lens model, title bar
-  theme.rs        -- Color functions (band colors, glass, text, meter, etc.)
+  mod.rs          -- Editor entry: create(), default_state(), Data lens model, TitleBarLabel
+  theme.rs        -- ~40 color functions, ThemeMode enum, Dark/Glass dual theme
   knob.rs         -- GlassKnob: custom rotary knob (arc + glass body, 3 sizes)
   meter.rs        -- GrMeterWidget: vertical segmented GR meter (custom draw)
   crossover.rs    -- CrossoverDisplay: log-freq band visualization, draggable handles
   segmented.rs    -- SegmentedParam: stepped enum parameter control
   toggle.rs       -- ToggleButton: bool param toggle (Normal/Solo/Sat variants)
   band_strip.rs   -- BandStrip: per-band vertical strip composing all controls
-  header.rs       -- Header: global controls bar (In/Out Gain, Mix, Sat Type, OS)
+  header.rs       -- Header: global controls bar (In/Out Gain, Mix, Sat Type, OS) + ThemeToggle
   spectrum.rs     -- SpectrumAnalyzer: real-time FFT spectrum display
+  about.rs        -- AboutDialog: full-screen overlay with logo, version, author, GitHub link
+
+assets/
+  noto_sans_jp_kana.ttf  -- Noto Sans JP subset (hiragana/katakana) for femtovg fallback
 
 src/dsp/
   spectrum.rs     -- SpectrumBuffer (lock-free triple-buffer), in-crate FFT (2048-pt)
@@ -46,25 +51,98 @@ struct Data {
 Additional shared state passed directly to widgets (not via lens):
 - `Arc<SpectrumBuffer>` for spectrum analyzer
 - `sample_rate: f32` for frequency bin calculation
+- `glass_mode: Arc<AtomicBool>` cloned from `IvylaceParams` into each widget
 
 ### 1.4 Layout Hierarchy
 
 ```
-VStack (root, background: #0A0A1A)
-  HStack (title bar, 32px)
-  Header (80px)
+VStack (root, background: lens-reactive page_bg)
+  HStack (title bar, 28px) — TitleBarLabel (click → About dialog)
+  Header (70px) — In/Out Gain, Mix, Sat Type, OS Realtime/Render, ThemeToggle
   CrossoverDisplay (96px)
-  SpectrumAnalyzer (80px)
   HStack (band strips, Stretch)
     BandStrip x 4 (each Stretch(1.0))
+  AboutDialog (SelfDirected overlay, full screen, conditionally hoverable)
   ResizeHandle
 ```
 
 ---
 
-## 2. Custom Widgets
+## 2. Theme System
 
-### 2.1 GlassKnob (`knob.rs`)
+### 2.1 Dual Theme Architecture
+
+- `ThemeMode { Dark, Glass }` enum
+- `glass_mode: Arc<AtomicBool>` with `#[persist = "glass-mode"]` on IvylaceParams
+- ThemeToggle button in header flips the AtomicBool + `cx.needs_redraw()`
+- All ~40 color functions in `theme.rs` take `mode: ThemeMode`
+
+### 2.2 Color Reactivity
+
+Two mechanisms for theme-reactive colors:
+
+**femtovg (custom draw):** widgets hold `glass_mode: Arc<AtomicBool>`, read in `View::draw()`:
+```rust
+let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
+let color = theme::some_color(mode);
+```
+
+**VIZIA layout properties:** use lens-based reactive colors:
+```rust
+fn mode_lens() -> impl Lens<Target = ThemeMode> {
+    Data::params.map(|p| {
+        if p.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark }
+    })
+}
+// Usage:
+.background_color(mode_lens().map(|m| theme::to_vizia(theme::panel_bg(*m))))
+```
+
+### 2.3 Band Colors
+
+| Band    | Color   | Hex       |
+|---------|---------|-----------|
+| Low     | Red     | `#FF6B6B` |
+| LowMid  | Orange  | `#FFA94D` |
+| HighMid  | Green   | `#69DB7C` |
+| High    | Blue    | `#74C0FC` |
+
+### 2.4 Dark Theme Colors
+
+| Element | Value |
+|---------|-------|
+| Page background | `rgba(10, 10, 26, 255)` |
+| Panel bg | `rgba(255, 255, 255, 18)` |
+| Panel border | `rgba(255, 255, 255, 30)` |
+| Text primary | `rgba(255, 255, 255, 230)` |
+| Text secondary | `rgba(255, 255, 255, 128)` |
+| Text dim | `rgba(255, 255, 255, 77)` |
+
+### 2.5 Glass Theme Colors
+
+| Element | Value |
+|---------|-------|
+| Page background | `rgba(220, 225, 240, 255)` |
+| Panel bg | `rgba(255, 255, 255, 120)` |
+| Panel border | `rgba(255, 255, 255, 180)` |
+| Text primary | `rgba(20, 20, 40, 230)` |
+| Text secondary | `rgba(30, 30, 60, 150)` |
+| Text dim | `rgba(40, 40, 80, 100)` |
+
+### 2.6 Special Colors
+
+| Purpose | Hex |
+|---------|-----|
+| Accent gold | `#E8A838` |
+| Solo yellow | `#FFD43B` |
+| About link (Dark) | `rgba(120, 200, 255, 200)` |
+| About link (Glass) | `rgba(40, 120, 200, 200)` |
+
+---
+
+## 3. Custom Widgets
+
+### 3.1 GlassKnob (`knob.rs`)
 
 Glassmorphism-style rotary knob with colored arc indicator.
 
@@ -80,8 +158,8 @@ Glassmorphism-style rotary knob with colored arc indicator.
 2. Value arc: band color stroke + glow (6px feathered)
 3. Glass body: radial gradient (white-tint top-left to dark bottom-right)
 4. Indicator line: 2px colored line rotated to value angle + glow
-5. Label text below (parameter name, uppercase, 9pt)
-6. Value display below (monospace, 10pt)
+5. Label text below (parameter name, uppercase, 9pt) — lens-reactive color
+6. Value display below (monospace, 10pt) — lens-reactive color
 
 **Interaction**:
 - Vertical drag: 200px = full range
@@ -90,7 +168,7 @@ Glassmorphism-style rotary knob with colored arc indicator.
 - Alt/Cmd+click: reset to default
 - Mouse scroll: step increment/decrement (shift = finer)
 
-### 2.2 GrMeterWidget (`meter.rs`)
+### 3.2 GrMeterWidget (`meter.rs`)
 
 Vertical gain reduction meter, 20x112px.
 
@@ -100,16 +178,17 @@ Vertical gain reduction meter, 20x112px.
 - Fill from top (0dB) down: blue (#4A9EFF) gradient, red (#FF4466) at high GR
 - Peak hold line: red (#FF6B6B), 2px, 1s hold + exponential decay
 - Scale marks at 0, -6, -12, -20, -30 dB
-- Value readout below (-40 to 0 dB range)
+- Value readout below (-40 to 0 dB range) — lens-reactive color
+- GR label — lens-reactive color
 
 **Data source**: `Data::gr_outputs.map(move |o| o.band_gr[band_idx].load())`
 
-### 2.3 CrossoverDisplay (`crossover.rs`)
+### 3.3 CrossoverDisplay (`crossover.rs`)
 
 Full-width, 96px height, log-frequency display.
 
 **Drawing**:
-- Background: `rgba(0,0,0,51)`
+- Background: theme-reactive
 - 4 band color fill regions (gradient top-to-bottom, 7% to 2% alpha)
 - Grid lines at 50, 100, 200, 500, 1k, 2k, 5k, 10k Hz
 - Frequency labels at bottom (7pt)
@@ -124,16 +203,17 @@ Full-width, 96px height, log-frequency display.
 - Constraints: handles can't cross (1.1x minimum spacing)
 - Double-click: reset handle to default
 
-### 2.4 SegmentedParam (`segmented.rs`)
+### 3.4 SegmentedParam (`segmented.rs`)
 
 Stepped segmented control for EnumParam (Ratio, Attack, Release).
 
 - HStack of SegmentButton views
-- Active state via `toggle_class("seg-active", lens)`
+- Active state: combined lens (param active state + theme mode) via `ParamWidgetBase::make_lens`
 - Click emits `RawParamEvent` (BeginSet, SetNormalized, EndSet)
-- Glass-style background: `rgba(255,255,255,15)` with border
+- Glass-style background: lens-reactive `seg_bg` / `seg_border`
+- Label color: lens-reactive `text_dim`
 
-### 2.5 ToggleButton (`toggle.rs`)
+### 3.5 ToggleButton (`toggle.rs`)
 
 Boolean parameter toggle with 3 variants:
 
@@ -145,10 +225,10 @@ Boolean parameter toggle with 3 variants:
 
 **Drawing**:
 - Active: linear gradient fill + border + glow (box_gradient)
-- Inactive: dark glass (`rgba(255,255,255,15)`) + border
+- Inactive: dark glass + border (theme-reactive)
 - Text: dark on active, grey on inactive
 
-### 2.6 SpectrumAnalyzer (`spectrum.rs`)
+### 3.6 SpectrumAnalyzer (`spectrum.rs`)
 
 Real-time FFT spectrum display, 80px height.
 
@@ -163,54 +243,47 @@ Real-time FFT spectrum display, 80px height.
 - Background: semi-transparent dark
 - Log-frequency X axis (20Hz-20kHz, matching crossover display)
 - dB Y axis (-90 to 0 dB)
-- Filled path: gradient fill (`rgba(100,180,255,25)` to `rgba(100,180,255,5)`)
-- Stroke: `rgba(120,200,255,100)`, 1.5px
+- Filled path: gradient fill
+- Stroke: 1.5px
 - Exponential smoothing (0.8 factor) between frames
 
----
+### 3.7 AboutDialog (`about.rs`)
 
-## 3. Color Theme
+Full-screen overlay dialog with centered info panel.
 
-Glassmorphism dark theme. All colors defined as functions in `theme.rs`.
+**Trigger**: Click on title bar label (TitleBarLabel in mod.rs)
 
-### 3.1 Band Colors
+**Resources** (compile-time embedded):
+- Logo: `include_bytes!("../../ivylace_logo.png")` → decoded by `image` crate at widget creation
+- Font: Noto Sans Regular (Latin, from nih-plug assets) + `assets/noto_sans_jp_kana.ttf` (JP fallback)
 
-| Band    | Color   | Hex       |
-|---------|---------|-----------|
-| Low     | Red     | `#FF6B6B` |
-| LowMid  | Orange  | `#FFA94D` |
-| HighMid  | Green   | `#69DB7C` |
-| High    | Blue    | `#74C0FC` |
+**GPU resources** (lazy init via `Cell<Option<...>>`):
+- `vg::ImageId` — logo texture uploaded on first draw
+- `(vg::FontId, vg::FontId)` — Latin + JP fonts registered on first draw
 
-### 3.2 Special Colors
+**Drawing**:
+- Full-screen dimming overlay (Dark: `rgba(0,0,0,180)`, Glass: `rgba(0,0,0,100)`)
+- Centered panel (340x380px, 16px corner radius)
+- Panel background: theme-reactive solid color
+- Logo image (260px width, aspect-preserved, rounded corners)
+- Text stack: "Ivylace", version, "Multiband Glue Compressor", "by きょーこ", GitHub URL, "Built with nih-plug"
+- Font fallback: `paint.set_font(&[latin_id, jp_id])` for mixed Latin/Japanese text
 
-| Purpose       | Hex       |
-|---------------|-----------|
-| Accent gold       | `#E8A838` |
-| Solo yellow   | `#FFD43B` |
-| Page background | `#0A0A1A` |
+**Event handling**:
+- Click anywhere → close (`visible.store(false)`)
+- `hoverable()` uses lens: `Data::params.map(move |_| vis.load(Ordering::Relaxed))`
+  - When visible=false, VIZIA's hit-test skips the overlay entirely
+  - This prevents blocking events to widgets below when the dialog is hidden
 
-### 3.3 Glass/Panel Colors
+**Positioning**: `PositionType::SelfDirected` with full-screen bounds (left/top=0, width/height=Stretch(1.0))
 
-Semi-transparent white overlays on dark background:
+### 3.8 ThemeToggle (`header.rs`)
 
-| Element | Alpha |
-|---------|-------|
-| Glass panel bg | 7% |
-| Glass border | 12% |
-| Knob body light | 18% |
-| Knob body dark | 15% |
-| Toggle off bg | 6% |
-| Meter bg | `rgba(0,0,0,76)` |
+Theme mode toggle button in the header.
 
-### 3.4 Text Colors
-
-| Role | RGBA |
-|------|------|
-| Primary | `rgba(255,255,255,230)` |
-| Secondary | `rgba(255,255,255,128)` |
-| Dim | `rgba(255,255,255,77)` |
-| On active bg | `rgba(0,0,0,216)` |
+- Custom View with `glass_mode: Arc<AtomicBool>`
+- Drawing: Sun icon (Dark mode) / Moon icon (Glass mode) with theme-reactive colors
+- Click: flips `glass_mode` AtomicBool + `cx.needs_redraw()`
 
 ---
 
@@ -263,18 +336,24 @@ Output samples (L+R)/2
 
 Each `BandStrip` (vertical, 1/4 width) contains:
 
-1. **Accent line** (2px, band color)
-2. **Band name** (11pt bold, band color)
+1. **Accent line** (2px, band color) — lens-reactive
+2. **Band name** (11pt bold, band color) — lens-reactive
 3. **GR Meter** (20x112px, centered)
 4. **Threshold knob** (Lg, band color)
 5. **Ratio segmented** (3 steps: 2:1 / 4:1 / 10:1)
 6. **Attack segmented** (6 steps: 0.1-30 ms)
 7. **Release segmented** (5 steps: 100ms-Auto)
 8. **Makeup knob** (Md) + **SC HPF knob** (Sm) in HStack
-9. **Saturation section** (glass panel):
+9. **Saturation section** (glass panel, lens-reactive bg/border):
    - Drive knob (Sm, accent color)
    - SAT toggle (Sat variant)
 10. **Footer**: IN toggle (Normal) + Solo toggle (Solo)
+
+**Spacing**:
+- RATIO/ATTACK/RELEASE: `row_between(15.0)`
+- RELEASE-to-MAKEUP gap: `top(Pixels(24.0))`
+- SATURATION section: `height(Auto)` on both VStack and inner HStack
+- Footer: `top(Pixels(6.0))`, `bottom(Pixels(10.0))`
 
 ---
 
