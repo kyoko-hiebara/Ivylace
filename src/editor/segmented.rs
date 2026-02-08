@@ -10,11 +10,42 @@ use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 
 use super::theme::{self, ThemeMode};
 use super::Data;
+use crate::SlotStorage;
 
 fn mode_lens() -> impl Lens<Target = ThemeMode> {
     Data::params.map(|p| {
         if p.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark }
     })
+}
+
+/// Describes which slot enum field a segmented control should read for display.
+#[derive(Clone, Copy)]
+pub(crate) enum SlotEnumKind {
+    Attack,
+    Release,
+    Ratio,
+}
+
+/// Optional slot value source for A/B display override on segmented controls.
+pub(crate) struct SlotEnumSource {
+    pub slot_a: Arc<SlotStorage>,
+    pub slot_b: Arc<SlotStorage>,
+    pub is_b: Arc<AtomicBool>,
+    pub kind: SlotEnumKind,
+    pub band_idx: usize,
+}
+
+impl SlotEnumSource {
+    /// Get the normalized value (0..1) from the active slot.
+    #[inline]
+    fn normalized(&self) -> f32 {
+        let slot = if self.is_b.load(Ordering::Relaxed) { &self.slot_b } else { &self.slot_a };
+        match self.kind {
+            SlotEnumKind::Attack => slot.attack_normalized(self.band_idx),
+            SlotEnumKind::Release => slot.release_normalized(self.band_idx),
+            SlotEnumKind::Ratio => slot.ratio_normalized(self.band_idx),
+        }
+    }
 }
 
 /// A segmented parameter control that displays all enum variants as buttons.
@@ -34,6 +65,26 @@ impl SegmentedParam {
         P: Param + 'static,
         FMap: Fn(&Params) -> &P + Copy + 'static + Send + Sync,
     {
+        Self::new_with_slot(cx, params, params_to_param, label, glass_mode, None)
+    }
+
+    pub fn new_with_slot<'a, L, Params, P, FMap>(
+        cx: &'a mut Context,
+        params: L,
+        params_to_param: FMap,
+        label: Option<&str>,
+        glass_mode: Arc<AtomicBool>,
+        slot_source: Option<SlotEnumSource>,
+    ) -> Handle<'a, Self>
+    where
+        L: Lens<Target = Params> + Clone + Send + Sync,
+        Params: 'static,
+        P: Param + 'static,
+        FMap: Fn(&Params) -> &P + Copy + 'static + Send + Sync,
+    {
+        // Wrap in Arc so each button can share the slot source
+        let slot_arc: Option<Arc<SlotEnumSource>> = slot_source.map(Arc::new);
+
         Self.build(cx, |cx| {
             // Optional label above the button row
             if let Some(label_text) = label {
@@ -48,6 +99,7 @@ impl SegmentedParam {
 
             // Container for the buttons
             let gm = glass_mode.clone();
+            let slot_for_buttons = slot_arc.clone();
             HStack::new(cx, move |cx| {
                 let param_base_temp = ParamWidgetBase::new(cx, params.clone(), params_to_param);
                 let step_count = param_base_temp.step_count().unwrap_or(0);
@@ -68,6 +120,7 @@ impl SegmentedParam {
                         step_count,
                         normalized,
                         gm.clone(),
+                        slot_for_buttons.clone(),
                     );
                 }
             })
@@ -98,6 +151,8 @@ struct SegmentButton {
     glass_mode: Arc<AtomicBool>,
     /// Whether a gesture is currently in progress (begin_set called, end_set pending)
     gesture_active: bool,
+    /// Optional slot enum source for A/B display override
+    slot_source: Option<Arc<SlotEnumSource>>,
 }
 
 impl SegmentButton {
@@ -110,6 +165,7 @@ impl SegmentButton {
         step_count: usize,
         normalized_value: f32,
         glass_mode: Arc<AtomicBool>,
+        slot_source: Option<Arc<SlotEnumSource>>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone + Send + Sync,
@@ -120,11 +176,16 @@ impl SegmentButton {
         let param_base = ParamWidgetBase::new(cx, params.clone(), params_to_param);
 
         let gm_text = glass_mode.clone();
+        let slot_for_lens = slot_source.clone();
         let text_color_lens = ParamWidgetBase::make_lens(
             params.clone(),
             params_to_param,
             move |param| {
-                let current = param.unmodulated_normalized_value();
+                // Use slot value for active detection when available
+                let current = match &slot_for_lens {
+                    Some(sv) => sv.normalized(),
+                    None => param.unmodulated_normalized_value(),
+                };
                 let current_step = (current * step_count as f32).round() as usize;
                 let is_active = current_step == step_index;
                 let mode = if gm_text.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
@@ -145,6 +206,7 @@ impl SegmentButton {
             normalized_value,
             glass_mode,
             gesture_active: false,
+            slot_source,
         }
         .build(cx, move |cx| {
             Label::new(cx, &label_owned)
@@ -209,7 +271,11 @@ impl View for SegmentButton {
         let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
         let dpi = cx.scale_factor();
 
-        let current_normalized = self.param_base.unmodulated_normalized_value();
+        // Use slot value for active detection when available
+        let current_normalized = match &self.slot_source {
+            Some(sv) => sv.normalized(),
+            None => self.param_base.unmodulated_normalized_value(),
+        };
         let current_step = (current_normalized * self.step_count as f32).round() as usize;
         let is_active = current_step == self.step_index;
 

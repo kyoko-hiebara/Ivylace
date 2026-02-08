@@ -4,6 +4,7 @@
 /// In-crate radix-2 Cooley-Tukey FFT (4096-point, f32).
 /// No heap allocations on the audio thread path.
 
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// FFT size (must be power of 2)
@@ -14,9 +15,16 @@ pub const NUM_BINS: usize = FFT_SIZE / 2;
 /// Lock-free ring buffer for passing audio samples from audio→GUI thread.
 /// Audio thread writes into current write slot; GUI thread reads from a
 /// different slot. Triple-buffer ensures no contention.
+///
+/// Uses `UnsafeCell` for interior mutability to satisfy Rust aliasing rules.
+/// The audio thread only writes to the current `write_idx` buffer,
+/// and the GUI thread only reads from the `ready_idx` buffer.
+/// The triple-buffer pattern with atomic swaps ensures these are always
+/// different buffers, so no data races occur.
 pub struct SpectrumBuffer {
-    /// Three sample buffers for triple-buffering
-    buffers: [Box<[f32; FFT_SIZE]>; 3],
+    /// Three sample buffers for triple-buffering, wrapped in UnsafeCell
+    /// for interior mutability (audio thread writes through &self).
+    buffers: [UnsafeCell<Box<[f32; FFT_SIZE]>>; 3],
     /// Write position within current write buffer
     write_pos: AtomicUsize,
     /// Index of the buffer currently being written to (0, 1, or 2)
@@ -25,20 +33,22 @@ pub struct SpectrumBuffer {
     ready_idx: AtomicUsize,
 }
 
-// SAFETY: The atomic operations ensure safe cross-thread access
+// SAFETY: The triple-buffer protocol with atomic operations ensures that
+// the audio thread (writer) and GUI thread (reader) never access the same
+// buffer simultaneously. write_idx and ready_idx are always distinct,
+// and buffer swaps are atomic.
 unsafe impl Send for SpectrumBuffer {}
 unsafe impl Sync for SpectrumBuffer {}
 
 impl SpectrumBuffer {
     pub fn new() -> Self {
-        // Use Vec to avoid placing large arrays on the stack
-        fn make_buffer() -> Box<[f32; FFT_SIZE]> {
-            let v = vec![0.0f32; FFT_SIZE];
-            let boxed_slice = v.into_boxed_slice();
-            unsafe {
-                let ptr = Box::into_raw(boxed_slice) as *mut [f32; FFT_SIZE];
-                Box::from_raw(ptr)
-            }
+        fn make_buffer() -> UnsafeCell<Box<[f32; FFT_SIZE]>> {
+            let v: Vec<f32> = vec![0.0f32; FFT_SIZE];
+            // SAFETY: Vec is exactly FFT_SIZE elements, matching the array size.
+            let boxed_array: Box<[f32; FFT_SIZE]> = v.into_boxed_slice()
+                .try_into()
+                .expect("Vec length matches FFT_SIZE");
+            UnsafeCell::new(boxed_array)
         }
         Self {
             buffers: [make_buffer(), make_buffer(), make_buffer()],
@@ -55,12 +65,13 @@ impl SpectrumBuffer {
         let wi = self.write_idx.load(Ordering::Relaxed);
         let pos = self.write_pos.load(Ordering::Relaxed);
 
-        // SAFETY: we only write within bounds, and wi is always 0..2
-        let buf = unsafe {
-            let ptr = self.buffers[wi].as_ptr() as *mut f32;
-            &mut *ptr.add(pos)
-        };
-        *buf = sample;
+        // SAFETY: Only the audio thread writes to buffers[wi], and wi != ready_idx
+        // (the GUI thread only reads from buffers[ready_idx]).
+        // UnsafeCell provides the interior mutability contract.
+        unsafe {
+            let buf = &mut *self.buffers[wi].get();
+            buf[pos] = sample;
+        }
 
         let next_pos = pos + 1;
         if next_pos >= FFT_SIZE {
@@ -68,15 +79,10 @@ impl SpectrumBuffer {
             self.write_pos.store(0, Ordering::Relaxed);
             // Mark current as ready
             self.ready_idx.store(wi, Ordering::Release);
-            // Move to next write buffer (skip the ready one)
-            // No iterator — plain arithmetic to avoid any potential allocation
-            let ri = self.ready_idx.load(Ordering::Relaxed);
-            let next_wi = match (wi, ri) {
-                (0, 1) | (1, 0) => 2,
-                (0, 2) | (2, 0) => 1,
-                (1, 2) | (2, 1) => 0,
-                _ => (wi + 1) % 3,
-            };
+            // Move to next write buffer.
+            // Simple round-robin: advance to next buffer, skipping the one we just
+            // marked as ready (= wi). Since (wi + 1) % 3 != wi, this always works.
+            let next_wi = (wi + 1) % 3;
             self.write_idx.store(next_wi, Ordering::Relaxed);
         } else {
             self.write_pos.store(next_pos, Ordering::Relaxed);
@@ -87,7 +93,9 @@ impl SpectrumBuffer {
     /// Returns a reference to FFT_SIZE samples.
     pub fn read(&self) -> &[f32; FFT_SIZE] {
         let ri = self.ready_idx.load(Ordering::Acquire);
-        &self.buffers[ri]
+        // SAFETY: The GUI thread only reads from buffers[ri], and ri != write_idx
+        // (the audio thread only writes to buffers[write_idx]).
+        unsafe { &**self.buffers[ri].get() }
     }
 }
 
@@ -100,13 +108,9 @@ pub fn hann_window() -> Box<[f32; FFT_SIZE]> {
     for i in 0..FFT_SIZE {
         w[i] = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n).cos());
     }
-    // Convert Vec to Box<[f32; FFT_SIZE]> without going through stack
-    let boxed_slice = w.into_boxed_slice();
-    // SAFETY: Vec was exactly FFT_SIZE elements
-    unsafe {
-        let ptr = Box::into_raw(boxed_slice) as *mut [f32; FFT_SIZE];
-        Box::from_raw(ptr)
-    }
+    w.into_boxed_slice()
+        .try_into()
+        .expect("Vec length matches FFT_SIZE")
 }
 
 /// Radix-2 Cooley-Tukey FFT (in-place, decimation-in-time).

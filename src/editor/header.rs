@@ -1,5 +1,6 @@
 /// Global controls header bar.
-/// Contains: Input Gain, Mix, Sat Type, OS Realtime, OS Render, Output Gain, Delta Monitor, Theme Toggle.
+/// Contains: Input Gain, Mix, Sat Type, OS Realtime, OS Render, Output Gain,
+///           AUTO + Delta (stacked), Theme Toggle.
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 
+use super::ab_toggle::{AbToggle, InitButton};
+use super::auto_button::{AutoButton, SharedAutoPhase};
 use super::knob::{GlassKnob, KnobSize};
 use super::segmented::SegmentedParam;
 use super::theme::{self, ThemeMode};
@@ -21,7 +24,11 @@ fn mode_lens() -> impl Lens<Target = ThemeMode> {
 pub struct Header;
 
 impl Header {
-    pub fn new(cx: &mut Context, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self> {
+    pub fn new(
+        cx: &mut Context,
+        glass_mode: Arc<AtomicBool>,
+        auto_phase: Arc<SharedAutoPhase>,
+    ) -> Handle<'_, Self> {
         Self.build(cx, move |cx| {
             let gm = glass_mode.clone();
             HStack::new(cx, move |cx| {
@@ -103,10 +110,11 @@ impl Header {
                 .border_width(Pixels(1.0))
                 .border_radius(Pixels(8.0));
 
-                // ── Right group: Out Gain + Delta Monitor + Theme Toggle ──
+                // ── Right group: Out Gain + AUTO/Delta stack + Theme Toggle ──
                 let gm_right = gm.clone();
                 let p_right = Data::params.get(cx);
                 let delta_monitor = p_right.delta_monitor.clone();
+                let auto_phase_right = auto_phase.clone();
                 HStack::new(cx, move |cx| {
                     GlassKnob::new(
                         cx,
@@ -117,7 +125,48 @@ impl Header {
                         "Out Gain",
                         gm_right.clone(),
                     );
-                    DeltaMonitorToggle::new(cx, delta_monitor.clone(), gm_right.clone());
+
+                    // AUTO + DELTA + A/B stacked (two columns: [AUTO, DELTA] + [A/B])
+                    let gm_stack = gm_right.clone();
+                    let auto_st = Data::auto_state.get(cx);
+                    let auto_ph = auto_phase_right.clone();
+                    let p_ab = Data::params.get(cx);
+                    let sa_ab = Data::slot_a.get(cx);
+                    let sb_ab = Data::slot_b.get(cx);
+                    HStack::new(cx, move |cx| {
+                        // Left column: AUTO + DELTA
+                        let gm_col1 = gm_stack.clone();
+                        VStack::new(cx, move |cx| {
+                            AutoButton::new(
+                                cx,
+                                auto_st.clone(),
+                                auto_ph.clone(),
+                                gm_col1.clone(),
+                            );
+                            DeltaMonitorToggle::new(cx, delta_monitor.clone(), gm_col1.clone());
+                        })
+                        .row_between(Pixels(6.0))
+                        .width(Auto)
+                        .height(Auto);
+
+                        // Right column: A/B toggle + INIT (stacked vertically)
+                        let gm_col2 = gm_stack.clone();
+                        VStack::new(cx, move |cx| {
+                            AbToggle::new(cx, p_ab.clone(), sa_ab.clone(), sb_ab.clone(), gm_col2.clone());
+                            InitButton::new(cx, p_ab.clone(), sa_ab.clone(), sb_ab.clone(), gm_col2.clone());
+                        })
+                        .row_between(Pixels(6.0))
+                        .width(Auto)
+                        .height(Auto)
+                        .top(Stretch(1.0))
+                        .bottom(Stretch(1.0));
+                    })
+                    .col_between(Pixels(4.0))
+                    .top(Stretch(1.0))
+                    .bottom(Stretch(1.0))
+                    .width(Auto)
+                    .height(Auto);
+
                     ThemeToggle::new(cx, gm_right.clone());
                 })
                 .col_between(Pixels(12.0))
@@ -157,8 +206,8 @@ impl DeltaMonitorToggle {
     fn new(cx: &mut Context, delta_monitor: Arc<AtomicBool>, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self> {
         Self { delta_monitor, glass_mode, font_id: Cell::new(None) }
             .build(cx, |_| {})
-            .width(Pixels(38.0))
-            .height(Pixels(28.0))
+            .width(Pixels(44.0))
+            .height(Pixels(22.0))
             .cursor(CursorIcon::Hand)
     }
 

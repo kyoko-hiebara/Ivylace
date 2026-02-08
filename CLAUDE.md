@@ -31,20 +31,22 @@ ivylace/
 │   └── workflows/
 │       └── build.yml       # CI: macOS Universal + Windows (no Linux)
 └── src/
-    ├── lib.rs              # Plugin entry: Ivylace struct, IvylaceParams, process()
+    ├── lib.rs              # Plugin entry: Ivylace struct, IvylaceParams, process(), SlotStorage, A/B slots
     ├── editor/
     │   ├── mod.rs          # Editor entry: create(), default_state(), Data lens model, title bar, BackgroundGradient
     │   ├── theme.rs        # Color functions (~45 functions), Dark/Glass dual theme
-    │   ├── knob.rs         # GlassKnob: custom rotary knob (3 sizes)
+    │   ├── knob.rs         # GlassKnob: custom rotary knob (3 sizes), SlotValueSource for A/B display
     │   ├── meter.rs        # GrMeterWidget (vertical bar) + AnalogGrMeter (needle gauge)
     │   ├── crossover.rs    # CrossoverDisplay: log-freq band display, draggable handles
-    │   ├── segmented.rs    # SegmentedParam: stepped enum control
+    │   ├── segmented.rs    # SegmentedParam: stepped enum control, SlotEnumSource for A/B display
     │   ├── toggle.rs       # ToggleButton: bool param toggle (Normal/Solo/Sat/Power)
-    │   ├── band_strip.rs   # BandStrip: per-band control strip
-    │   ├── header.rs       # Header: global controls bar + ThemeToggle
+    │   ├── band_strip.rs   # BandStrip: per-band control strip (slot-aware)
+    │   ├── header.rs       # Header: global controls bar + ThemeToggle + A/B + INIT
     │   ├── spectrum.rs     # SpectrumAnalyzer: delta spectrum display (pre/post difference, cut=blue/boost=orange)
     │   ├── about.rs        # AboutDialog: overlay with theme-dependent logo, version, author, GitHub link
-    │   └── pets.rs         # WalkingPets: cosmetic easter egg (chick + cat, femtovg paths)
+    │   ├── pets.rs         # WalkingPets: cosmetic easter egg (chick + cat, femtovg paths)
+    │   ├── auto_button.rs  # AutoButton: AUTO threshold analysis trigger + overlay
+    │   └── ab_toggle.rs    # AbToggle: A/B slot switch + InitButton: parameter reset
     └── dsp/
         ├── mod.rs          # Module declarations
         ├── crossover.rs    # 4-band LR4 (24dB/oct) Linkwitz-Riley crossover
@@ -52,7 +54,8 @@ ivylace/
         ├── saturation.rs   # Analog saturation (Tube/Tape/Console, per-band)
         ├── oversampling.rs # 2x/4x oversampling (halfband FIR, zero-stuffing)
         ├── gr_meter.rs     # Gain reduction metering (lock-free AtomicF32)
-        └── spectrum.rs     # FFT + lock-free triple-buffer for spectrum analyzer
+        ├── spectrum.rs     # FFT + lock-free triple-buffer for spectrum analyzer
+        └── auto_detect.rs  # AUTO threshold detection (RMS analysis, per-band target calculation)
 ```
 
 ## Architecture & Signal Flow
@@ -64,7 +67,8 @@ Input → Input Gain
     → Band 1 (LowMid):  120–1500Hz
     → Band 2 (HighMid): 1500–8000Hz
     → Band 3 (High):    8000Hz–Nyquist
-  → [Per Band] Oversampler(SslCompressor → BandSaturation)
+  → [Per Band] Read params from active A/B slot (lock-free atomics)
+    → Oversampler(SslCompressor → BandSaturation)
     └─ spectrum pre/post captured inside oversampled domain
   → Dry = crossover band sum (phase-coherent with wet)
   → Wet = processed band sum (with solo logic)
@@ -108,6 +112,12 @@ Input → Input Gain
 - Hann window applied before FFT
 - Pre/post both captured inside oversampled domain (FIR rolloff cancels in delta)
 
+### auto_detect.rs — AutoAnalysis
+- RMS-based threshold detection with configurable window size
+- Per-band target threshold calculation from input signal levels
+- Lock-free result delivery via `AutoAnalysisState` (AtomicF32 arrays)
+- Phased execution: Listening → Analyzing → Done, controlled by `SharedAutoPhase`
+
 ## GUI Architecture
 
 - **ViziaTheming::Custom** — all rendering via custom `View::draw()` with femtovg
@@ -118,6 +128,9 @@ Input → Input Gain
 - **Gesture split pattern** — `begin_set` + `set_value` on MouseDown, `end_set` on MouseUp (required for Cubase compatibility)
 - **ParamWidgetBase** for all parameter bindings
 - **Lock-free data flow** — AtomicF32 for GR meters, triple-buffer for spectrum
+- **A/B slot system** — dual parameter slots (A=manual, B=AUTO) with lock-free atomic storage, slot-aware widget display
+- **AUTO threshold analysis** — RMS-based automatic threshold detection with phased overlay UI
+- **INIT button** — resets all per-band compressor parameters in active slot to factory defaults
 - **About dialog** — overlay triggered by title bar click, with theme-dependent PNG logos and Japanese font fallback
 
 ### Theme System Details
@@ -204,7 +217,7 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Linux は対象外
 - タグ `v*` プッシュで GitHub Release (draft) 自動作成
 
-## Current State (v0.5.4)
+## Current State (v0.6.0)
 
 ### Implemented
 - 4-band LR4 crossover with adjustable frequencies
@@ -218,7 +231,7 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Full VIZIA GUI with custom widgets:
   - GlassKnob (3 sizes), GR meters (digital bar + analog needle), crossover display
   - Segmented controls, toggle buttons
-  - Header with global controls + theme toggle + delta monitor
+  - Header with global controls + theme toggle + delta monitor + A/B + INIT
 - **Delta spectrum analyzer** (v0.5.0)
   - Pre/post processing difference display (cut=blue, boost=orange)
   - 8192-point in-crate FFT, 1/3 octave smoothing, asymmetric attack/release
@@ -243,6 +256,16 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **VU-like meter ballistics** (v0.5.3): smoother attack (10ms) and slower release (600ms) for readable metering
 - **Walking pets easter egg** (v0.5.4): chick and cat walk across the bottom of band strips, drawn with femtovg paths for cross-platform compatibility
 - **Window height 860px** (v0.5.4): increased from 820 to accommodate analog meters and pets
+- **AUTO threshold detection** (v0.6.0): RMS-based automatic threshold analysis per band
+  - Phased analysis: Listening → Analyzing → Done with overlay UI
+  - Writes results to B slot, automatically switches to B slot on completion
+- **A/B parameter slots** (v0.6.0): dual lock-free parameter slots for instant comparison
+  - SlotStorage with per-band atomics (threshold, attack, release, ratio, makeup, SC HPF)
+  - A slot = manual settings, B slot = AUTO results (or manual edits)
+  - Slot-aware GUI: knob arcs, value labels, and segmented controls read from active slot
+  - Persistent across sessions via serde serialization (`SlotPersist`)
+  - Threshold linking correctly reads from active slot (not nih-plug internal state)
+- **INIT button** (v0.6.0): resets all per-band compressor parameters in active slot to defaults
 
 ### TODO
 
@@ -278,12 +301,16 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **Why dry = crossover band sum?** Dry/wet mix requires phase-coherent dry and wet paths. Raw input hasn't passed through the crossover's LR4 filters, so mixing it with the wet path (which has) causes phase cancellation. Using the crossover band sum as dry ensures identical phase characteristics.
 - **Why capture spectrum pre/post inside oversampler callback?** The oversampler's FIR lowpass attenuates high frequencies. If pre is captured before the FIR and post after, the FIR rolloff appears as false "gain reduction" in the delta display. Capturing both inside the callback means both share the same FIR path, so the delta shows only comp+sat effects.
 - **Why explicit zero-stuffing instead of polyphase FIR?** The original polyphase decomposition had subtle indexing bugs (even/odd branch swap, center tap double-count) that caused DC gain errors. Explicit zero-stuffing with a standard FIR convolution is simpler to verify and test.
+- **Why lock-free A/B slots with atomics?** Audio thread reads compressor parameters every sample. Using `Arc<SlotStorage>` with `AtomicF32`/`AtomicU32` avoids any locking on the audio thread. GUI writes to slot atomics directly; audio thread reads from active slot based on `ab_active_is_b: Arc<AtomicBool>`.
+- **Why `effective_normalized()` in knob.rs?** In A/B mode, nih-plug's internal param values may not match the active slot (especially for B slot values written by AUTO). All knob event handlers (drag, scroll, reset, link) must read from the slot atomics via `effective_normalized()` instead of `param_base.unmodulated_normalized_value()` to prevent stale-value bugs in linked threshold dragging.
+- **Why separate SlotPersist with serde?** `AtomicF32` doesn't implement `Serialize`/`Deserialize`. `SlotPersist` is a plain `f32`/`u32` snapshot that implements serde traits, stored in `Mutex<SlotPersist>` which implements nih-plug's `PersistentField`.
 
 ## Dependencies
 
 - `nih_plug` (git) — plugin framework
 - `nih_plug_vizia` (git) — VIZIA GUI integration
 - `image` (0.25, png feature only) — PNG logo decoding for About dialog
+- `serde` (1, derive feature) — A/B slot persistence serialization
 
 ## Notes
 

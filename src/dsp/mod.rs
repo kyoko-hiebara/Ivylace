@@ -1,3 +1,4 @@
+pub mod auto_detect;
 pub mod compressor;
 pub mod crossover;
 pub mod gr_meter;

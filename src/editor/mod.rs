@@ -8,7 +8,9 @@ use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
 
 use crate::dsp::gr_meter::GrMeterOutputs;
 use crate::dsp::spectrum::SpectrumBuffer;
-use crate::IvylaceParams;
+use crate::{AutoAnalysisState, IvylaceParams, SlotStorage};
+
+use auto_button::{AutoOverlay, SharedAutoPhase};
 
 pub mod theme;
 mod knob;
@@ -21,6 +23,8 @@ mod header;
 mod spectrum;
 mod about;
 mod pets;
+pub(crate) mod auto_button;
+pub(crate) mod ab_toggle;
 
 // ── Data Model (shared between audio and GUI via lenses) ─────
 
@@ -28,6 +32,9 @@ mod pets;
 pub(crate) struct Data {
     pub params: Arc<IvylaceParams>,
     pub gr_outputs: Arc<GrMeterOutputs>,
+    pub auto_state: Arc<AutoAnalysisState>,
+    pub slot_a: Arc<SlotStorage>,
+    pub slot_b: Arc<SlotStorage>,
 }
 
 impl Model for Data {}
@@ -44,9 +51,12 @@ pub(crate) fn create(
     spectrum_pre: Arc<SpectrumBuffer>,
     spectrum_post: Arc<SpectrumBuffer>,
     sample_rate: f32,
+    auto_state: Arc<AutoAnalysisState>,
     editor_state: Arc<ViziaState>,
+    slot_a: Arc<SlotStorage>,
+    slot_b: Arc<SlotStorage>,
 ) -> Option<Box<dyn Editor>> {
-    create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _gui_context| {
+    create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, gui_context| {
         assets::register_noto_sans_light(cx);
         assets::register_noto_sans_thin(cx);
         assets::register_noto_sans_regular(cx);
@@ -55,11 +65,15 @@ pub(crate) fn create(
         Data {
             params: params.clone(),
             gr_outputs: gr_outputs.clone(),
+            auto_state: auto_state.clone(),
+            slot_a: slot_a.clone(),
+            slot_b: slot_b.clone(),
         }
         .build(cx);
 
         // ── Full GUI: Header + Crossover + 4 Band Strips ──
         let about_visible = Arc::new(AtomicBool::new(false));
+        let auto_phase = Arc::new(SharedAutoPhase::new());
 
         let p_for_glass = Data::params.get(cx);
         let glass_mode_for_bg = p_for_glass.glass_mode.clone();
@@ -72,7 +86,7 @@ pub(crate) fn create(
             let glass_mode = p.glass_mode.clone();
 
             build_title_bar(cx, about_visible.clone());
-            header::Header::new(cx, glass_mode.clone());
+            header::Header::new(cx, glass_mode.clone(), auto_phase.clone());
             crossover::CrossoverDisplay::new(cx, glass_mode.clone());
             spectrum::SpectrumAnalyzer::new(
                 cx,
@@ -84,8 +98,10 @@ pub(crate) fn create(
 
             HStack::new(cx, |cx| {
                 let p = Data::params.get(cx);
+                let sa = Data::slot_a.get(cx);
+                let sb = Data::slot_b.get(cx);
                 for i in 0..4 {
-                    band_strip::BandStrip::new(cx, i, p.clone());
+                    band_strip::BandStrip::new(cx, i, p.clone(), sa.clone(), sb.clone());
                 }
             })
             .height(Stretch(1.0))
@@ -93,6 +109,13 @@ pub(crate) fn create(
 
             // Walking pets (cosmetic easter egg)
             pets::WalkingPets::new(cx, glass_mode.clone());
+
+            // Auto overlay (full-screen status display during analysis)
+            let auto_st_overlay = Data::auto_state.get(cx);
+            let p_overlay = Data::params.get(cx);
+            let slot_a_overlay = Data::slot_a.get(cx);
+            let slot_b_overlay = Data::slot_b.get(cx);
+            AutoOverlay::new(cx, auto_st_overlay, p_overlay, auto_phase.clone(), glass_mode.clone(), gui_context.clone(), slot_a_overlay, slot_b_overlay);
 
             // About dialog overlay (rendered last → on top of everything)
             about::AboutDialog::new(cx, about_visible.clone(), glass_mode.clone());

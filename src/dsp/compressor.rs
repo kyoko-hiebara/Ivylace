@@ -119,6 +119,11 @@ pub struct SslCompressor {
     auto_release_slow: f64, // slow time constant (ms)
     auto_release_blend: f64, // current blend factor
 
+    // Sample-rate-aware auto-release blend coefficients
+    // Ramp toward slow ~500ms time constant, toward fast ~100ms
+    blend_ramp_up_coeff: f64,
+    blend_ramp_down_coeff: f64,
+
     // Smoothed coefficients
     attack_coeff: f64,
     release_coeff: f64,
@@ -146,6 +151,8 @@ impl SslCompressor {
             auto_release_fast: 50.0,
             auto_release_slow: 1200.0,
             auto_release_blend: 0.0,
+            blend_ramp_up_coeff: 0.0,
+            blend_ramp_down_coeff: 0.0,
             attack_coeff: 0.0,
             release_coeff: 0.0,
             enabled: true,
@@ -219,6 +226,13 @@ impl SslCompressor {
         // Time constant: coeff = exp(-1 / (time_sec * sample_rate))
         self.attack_coeff = (-1.0 / (self.attack_ms * 0.001 * self.sample_rate)).exp();
         self.release_coeff = (-1.0 / (self.release_ms * 0.001 * self.sample_rate)).exp();
+
+        // Auto-release blend ramp coefficients (sample-rate aware).
+        // Ramp-up (toward slow): ~500ms time constant — slow transition prevents abrupt
+        // switching between fast and slow release, which causes audible pumping
+        // Ramp-down (toward fast): ~100ms time constant — gradual return to fast release
+        self.blend_ramp_up_coeff = (-1.0 / (0.500 * self.sample_rate)).exp();
+        self.blend_ramp_down_coeff = (-1.0 / (0.100 * self.sample_rate)).exp();
     }
 
     fn ms_to_coeff(&self, ms: f64) -> f64 {
@@ -268,8 +282,9 @@ impl SslCompressor {
         let sc_l = self.sc_hpf_l.process(left);
         let sc_r = self.sc_hpf_r.process(right);
 
-        // RMS-ish level detection (peak of abs, linked stereo)
-        // SSL uses peak detection with some RMS-like averaging
+        // Level detection: peak (max of |L|, |R|) — matches SSL 4000G hardware.
+        // Linked stereo peak detection preserves transient accuracy,
+        // which is critical for the "punch through" character of the SSL.
         let peak = sc_l.abs().max(sc_r.abs());
         let input_db = if peak > 1e-10 {
             20.0 * peak.log10()
@@ -281,6 +296,10 @@ impl SslCompressor {
         let target_db = input_db;
 
         // Attack/release ballistics
+        // The feed-forward topology detects the input level and applies gain.
+        // Attack: fast ramp up to input level (lets transients through).
+        // Release: exponential decay back to rest — the speed adapts to
+        // compression depth for auto-release, giving musical "breathing".
         let coeff = if target_db > self.envelope_db {
             // Attack phase
             self.attack_coeff
@@ -290,16 +309,21 @@ impl SslCompressor {
             let fast_coeff = self.ms_to_coeff(self.auto_release_fast);
             let slow_coeff = self.ms_to_coeff(self.auto_release_slow);
 
-            // Update blend: ramp toward slow during compression, toward fast during release
-            if self.gain_reduction_db < -1.0 {
-                // Compressing significantly - blend toward slow
+            // Update blend: ramp toward slow during compression, toward fast during release.
+            // Uses sample-rate-aware exponential coefficients (computed in update_coefficients).
+            // Hysteresis: ramp-up triggers at -2dB GR, ramp-down only when GR is above -0.5dB.
+            // This prevents rapid oscillation between fast and slow release when GR hovers
+            // near a single threshold, which is a major cause of audible pumping.
+            if self.gain_reduction_db < -2.0 {
+                // Compressing significantly - blend toward slow (target = 1.0)
+                self.auto_release_blend = self.blend_ramp_up_coeff * self.auto_release_blend
+                    + (1.0 - self.blend_ramp_up_coeff);
+            } else if self.gain_reduction_db > -0.5 {
+                // Barely compressing - blend toward fast (target = 0.0)
                 self.auto_release_blend =
-                    self.auto_release_blend * 0.9999 + 0.0001;
-            } else {
-                // Light/no compression - blend toward fast
-                self.auto_release_blend =
-                    self.auto_release_blend * 0.999;
+                    self.blend_ramp_down_coeff * self.auto_release_blend;
             }
+            // Between -2dB and -0.5dB: hold current blend (hysteresis zone)
 
             let blend = self.auto_release_blend.clamp(0.0, 1.0);
             fast_coeff * (1.0 - blend) + slow_coeff * blend
@@ -314,7 +338,8 @@ impl SslCompressor {
         self.gain_reduction_db = self.compute_gain_reduction(self.envelope_db);
 
         let total_gain_db = self.gain_reduction_db + self.makeup_db;
-        let gain_linear = 10.0_f64.powf(total_gain_db / 20.0);
+        // exp(x * ln10/20) is equivalent to 10^(x/20) but ~3x faster than powf
+        let gain_linear = (total_gain_db * (std::f64::consts::LN_10 / 20.0)).exp();
 
         // === Apply gain with mix (parallel compression) ===
         let wet_l = left * gain_linear;

@@ -508,6 +508,14 @@ pub fn delta_monitor_active(mode: ThemeMode) -> vg::Color {
     }
 }
 
+/// Active color for the AUTO button (emerald green, distinct from delta cyan)
+pub fn auto_button_active(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgb(0x4E, 0xD8, 0x80),   // emerald green
+        ThemeMode::Glass => vg::Color::rgb(0x38, 0xA8, 0x60),   // deeper green
+    }
+}
+
 // ── About dialog ────────────────────────────────────────────
 
 pub fn about_overlay_bg(mode: ThemeMode) -> vg::Color {

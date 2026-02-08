@@ -14,12 +14,50 @@ use nih_plug_vizia::widgets::RawParamEvent;
 
 use super::theme::{self, ThemeMode};
 use super::Data;
-use crate::IvylaceParams;
+use crate::{IvylaceParams, SlotStorage};
 
 fn mode_lens() -> impl Lens<Target = ThemeMode> {
     Data::params.map(|p| {
         if p.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark }
     })
+}
+
+/// Describes which slot field a knob should read for display override.
+#[derive(Clone, Copy)]
+pub(crate) enum SlotParamKind {
+    ThresholdDb,
+    MakeupDb,
+    ScHpfHz,
+}
+
+/// Optional slot value source for A/B display override.
+pub(crate) struct SlotValueSource {
+    pub slot_a: Arc<SlotStorage>,
+    pub slot_b: Arc<SlotStorage>,
+    pub is_b: Arc<AtomicBool>,
+    pub kind: SlotParamKind,
+    pub band_idx: usize,
+}
+
+impl SlotValueSource {
+    /// Get the normalized value (0..1) from the active slot.
+    #[inline]
+    fn normalized(&self) -> f32 {
+        let slot = if self.is_b.load(Ordering::Relaxed) { &self.slot_b } else { &self.slot_a };
+        match self.kind {
+            SlotParamKind::ThresholdDb => slot.threshold_normalized(self.band_idx),
+            SlotParamKind::MakeupDb => slot.makeup_normalized(self.band_idx),
+            SlotParamKind::ScHpfHz => slot.sc_hpf_normalized(self.band_idx),
+        }
+    }
+
+    /// Get threshold normalized value for an arbitrary band from the active slot.
+    /// Used by linked-drag to read other bands' threshold values.
+    #[inline]
+    fn threshold_normalized_for_band(&self, band: usize) -> f32 {
+        let slot = if self.is_b.load(Ordering::Relaxed) { &self.slot_b } else { &self.slot_a };
+        slot.threshold_normalized(band)
+    }
 }
 
 /// Knob sizes matching Figma spec
@@ -88,6 +126,9 @@ pub struct GlassKnob {
     my_start_value: f32,
     /// Active linked drag state (populated on drag start if any bands are linked)
     linked_drag: Option<LinkedDragState>,
+
+    /// Optional A/B slot value source for display override
+    slot_value: Option<SlotValueSource>,
 }
 
 impl GlassKnob {
@@ -106,39 +147,21 @@ impl GlassKnob {
         P: Param + 'static,
         FMap: Fn(&Params) -> &P + Copy + 'static,
     {
-        let param_base = ParamWidgetBase::new(cx, params.clone(), params_to_param);
-
-        Self {
-            param_base,
-            size,
-            color,
-            glass_mode,
-            drag_active: false,
-            granular_drag_status: None,
-            reset_gesture_active: false,
-            link_params: None,
-            link_band_idx: 0,
-            my_start_value: 0.0,
-            linked_drag: None,
-        }
-        .build(cx, |cx| {
-            Self::build_labels(cx, params, params_to_param, size, label);
-        })
-        .width(Pixels(size.outer().max(50.0)))
-        .height(Auto)
+        Self::new_full(cx, params, params_to_param, size, color, label, glass_mode, None, 0, None)
     }
 
-    /// Constructor for threshold knobs with link support.
-    pub fn new_with_link<'a, L, Params, P, FMap>(
+    /// Full constructor with all options (link support + slot value source).
+    pub fn new_full<'a, L, Params, P, FMap>(
         cx: &'a mut Context,
         params: L,
         params_to_param: FMap,
         size: KnobSize,
         color: vg::Color,
         label: &str,
-        all_params: Arc<IvylaceParams>,
-        band_idx: usize,
         glass_mode: Arc<AtomicBool>,
+        link_params: Option<Arc<IvylaceParams>>,
+        band_idx: usize,
+        slot_value: Option<SlotValueSource>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone,
@@ -148,6 +171,12 @@ impl GlassKnob {
     {
         let param_base = ParamWidgetBase::new(cx, params.clone(), params_to_param);
 
+        // Clone slot info for the label lens (self takes ownership of the original)
+        let slot_value_for_label: Option<(Arc<SlotStorage>, Arc<SlotStorage>, Arc<AtomicBool>, SlotParamKind, usize)> =
+            slot_value.as_ref().map(|sv| {
+                (sv.slot_a.clone(), sv.slot_b.clone(), sv.is_b.clone(), sv.kind, sv.band_idx)
+            });
+
         Self {
             param_base,
             size,
@@ -156,25 +185,29 @@ impl GlassKnob {
             drag_active: false,
             granular_drag_status: None,
             reset_gesture_active: false,
-            link_params: Some(all_params),
+            link_params,
             link_band_idx: band_idx,
             my_start_value: 0.0,
             linked_drag: None,
+            slot_value,
         }
         .build(cx, |cx| {
-            Self::build_labels(cx, params, params_to_param, size, label);
+            Self::build_labels(cx, params, params_to_param, size, label, slot_value_for_label);
         })
         .width(Pixels(size.outer().max(50.0)))
         .height(Auto)
     }
 
     /// Shared label building logic for both constructors.
+    /// `slot_info` is an optional tuple of (slot_a, slot_b, is_b, kind, band_idx)
+    /// used to read the display value from the active A/B slot instead of nih-plug params.
     fn build_labels<L, Params, P, FMap>(
         cx: &mut Context,
         params: L,
         params_to_param: FMap,
         size: KnobSize,
         label: &str,
+        slot_info: Option<(Arc<SlotStorage>, Arc<SlotStorage>, Arc<AtomicBool>, SlotParamKind, usize)>,
     ) where
         L: Lens<Target = Params> + Clone,
         Params: 'static,
@@ -204,9 +237,28 @@ impl GlassKnob {
                 .hoverable(false);
 
             // Value display below the label (e.g., "-20.0 dB")
-            let display_lens = ParamWidgetBase::make_lens(params.clone(), params_to_param, |param| {
-                param.normalized_value_to_string(param.unmodulated_normalized_value(), true)
-            });
+            // When slot_info is provided, read from the active slot atomics
+            // instead of nih-plug's internal param value (which may not update during processing).
+            let display_lens = ParamWidgetBase::make_lens(
+                params.clone(),
+                params_to_param,
+                move |param| {
+                    match &slot_info {
+                        Some((sa, sb, is_b, kind, idx)) => {
+                            let slot = if is_b.load(Ordering::Relaxed) { sb } else { sa };
+                            let normalized = match kind {
+                                SlotParamKind::ThresholdDb => slot.threshold_normalized(*idx),
+                                SlotParamKind::MakeupDb => slot.makeup_normalized(*idx),
+                                SlotParamKind::ScHpfHz => slot.sc_hpf_normalized(*idx),
+                            };
+                            param.normalized_value_to_string(normalized, true)
+                        }
+                        None => {
+                            param.normalized_value_to_string(param.unmodulated_normalized_value(), true)
+                        }
+                    }
+                },
+            );
 
             Label::new(cx, display_lens)
                 .font_size(10.0)
@@ -222,6 +274,16 @@ impl GlassKnob {
         .row_between(Pixels(2.0))
         .width(Stretch(1.0))
         .height(Auto);
+    }
+
+    /// Get the effective normalized value for this knob.
+    /// Reads from slot atomics when available (A/B mode), otherwise from nih-plug param.
+    #[inline]
+    fn effective_normalized(&self) -> f32 {
+        match &self.slot_value {
+            Some(sv) => sv.normalized(),
+            None => self.param_base.unmodulated_normalized_value(),
+        }
     }
 
     // ── Link helpers ──
@@ -247,7 +309,12 @@ impl GlassKnob {
             if all_params.bands[i].link.value() {
                 let param = &all_params.bands[i].threshold;
                 let ptr = param.as_ptr();
-                let start_val = unsafe { ptr.unmodulated_normalized_value() };
+                // Read start value from slot atomics when available (A/B mode),
+                // otherwise fall back to nih-plug's internal param value.
+                let start_val = match &self.slot_value {
+                    Some(sv) => sv.threshold_normalized_for_band(i),
+                    None => unsafe { ptr.unmodulated_normalized_value() },
+                };
                 entries.push((i, start_val, ptr));
             }
         }
@@ -262,7 +329,11 @@ impl GlassKnob {
             cx.emit(RawParamEvent::BeginSetParameter(ptr));
         }
 
-        self.my_start_value = self.param_base.unmodulated_normalized_value();
+        // Read own start value from slot when available
+        self.my_start_value = match &self.slot_value {
+            Some(sv) => sv.normalized(),
+            None => self.param_base.unmodulated_normalized_value(),
+        };
         self.linked_drag = Some(LinkedDragState { entries });
         true
     }
@@ -310,7 +381,10 @@ impl View for GlassKnob {
         let cx_x = bounds.x + bounds.w * 0.5;
         let cy_y = bounds.y + outer * 0.5;
 
-        let normalized = self.param_base.unmodulated_normalized_value();
+        let normalized = match &self.slot_value {
+            Some(sv) => sv.normalized(),
+            None => self.param_base.unmodulated_normalized_value(),
+        };
         let pct = normalized.clamp(0.0, 1.0);
 
         // Arc geometry: 270° sweep from -135° to +135°
@@ -406,7 +480,7 @@ impl View for GlassKnob {
                 if cx.modifiers().alt() || cx.modifiers().command() {
                     // Alt/Cmd+Click: reset to default
                     // Split gesture: begin+set on MouseDown, end on MouseUp
-                    let current = self.param_base.unmodulated_normalized_value();
+                    let current = self.effective_normalized();
                     let default = self.param_base.default_normalized_value();
 
                     self.param_base.begin_set_parameter(cx);
@@ -434,7 +508,7 @@ impl View for GlassKnob {
                     if cx.modifiers().shift() {
                         self.granular_drag_status = Some(GranularDragStatus {
                             starting_y: cx.mouse().cursory,
-                            starting_value: self.param_base.unmodulated_normalized_value(),
+                            starting_value: self.effective_normalized(),
                         });
                     } else {
                         self.granular_drag_status = None;
@@ -444,7 +518,7 @@ impl View for GlassKnob {
             }
             WindowEvent::MouseDoubleClick(MouseButton::Left) => {
                 // Double-click: reset to default
-                let current = self.param_base.unmodulated_normalized_value();
+                let current = self.effective_normalized();
                 let default = self.param_base.default_normalized_value();
 
                 // If a drag gesture is already active from the preceding MouseDown,
@@ -490,7 +564,7 @@ impl View for GlassKnob {
                     let new_value = if cx.modifiers().shift() {
                         let status = self.granular_drag_status.get_or_insert(GranularDragStatus {
                             starting_y: *y,
-                            starting_value: self.param_base.unmodulated_normalized_value(),
+                            starting_value: self.effective_normalized(),
                         });
 
                         let delta_y = status.starting_y - *y;
@@ -503,7 +577,7 @@ impl View for GlassKnob {
                     } else {
                         self.granular_drag_status = Some(GranularDragStatus {
                             starting_y: *y,
-                            starting_value: self.param_base.unmodulated_normalized_value(),
+                            starting_value: self.effective_normalized(),
                         });
                         return; // First move just records starting position
                     };
@@ -516,13 +590,13 @@ impl View for GlassKnob {
                 if self.drag_active && self.granular_drag_status.is_some() {
                     self.granular_drag_status = Some(GranularDragStatus {
                         starting_y: cx.mouse().cursory,
-                        starting_value: self.param_base.unmodulated_normalized_value(),
+                        starting_value: self.effective_normalized(),
                     });
                 }
             }
             WindowEvent::MouseScroll(_sx, sy) => {
                 let use_finer = cx.modifiers().shift();
-                let current = self.param_base.unmodulated_normalized_value();
+                let current = self.effective_normalized();
 
                 if !self.drag_active {
                     self.param_base.begin_set_parameter(cx);

@@ -36,6 +36,10 @@ fn x_to_freq(x: f32, width: f32) -> f32 {
     10.0_f32.powf(log_min + (x / width) * (log_max - log_min))
 }
 
+/// How many draw() calls to skip between FFT recomputes.
+/// At 60fps, skip_count=2 means FFT runs at ~20fps — still smooth but 3x less CPU.
+const FFT_SKIP_FRAMES: u32 = 2;
+
 /// Heap-allocated FFT work buffers to avoid stack overflow on GUI thread.
 struct FftWorkBuffers {
     real: Box<[f32; FFT_SIZE]>,
@@ -43,6 +47,8 @@ struct FftWorkBuffers {
     pre_mag: Box<[f32; NUM_BINS]>,
     post_mag: Box<[f32; NUM_BINS]>,
     smoothed_delta: Box<[f32; NUM_BINS]>,
+    /// Frame counter for FFT skip logic
+    frame_counter: u32,
 }
 
 impl FftWorkBuffers {
@@ -53,6 +59,7 @@ impl FftWorkBuffers {
             pre_mag: Box::new([-120.0f32; NUM_BINS]),
             post_mag: Box::new([-120.0f32; NUM_BINS]),
             smoothed_delta: Box::new([0.0f32; NUM_BINS]),
+            frame_counter: 0,
         }
     }
 }
@@ -119,46 +126,53 @@ impl View for SpectrumAnalyzer {
             canvas.fill_path(&path, &vg::Paint::color(theme::spectrum_bg(mode)));
         }
 
-        // ── Compute FFTs ──
+        // ── Compute FFTs (throttled to reduce GUI CPU) ──
         let mut work = self.work.borrow_mut();
 
-        // Pre-processing spectrum
-        {
-            let samples = self.spectrum_pre.read();
-            for i in 0..FFT_SIZE {
-                work.real[i] = samples[i] * self.window[i];
-                work.imag[i] = 0.0;
+        // Only recompute FFT every FFT_SKIP_FRAMES frames.
+        // Smoothed delta is always updated (using cached magnitudes) for smooth animation.
+        let should_recompute = work.frame_counter == 0;
+        work.frame_counter = (work.frame_counter + 1) % (FFT_SKIP_FRAMES + 1);
+
+        if should_recompute {
+            // Pre-processing spectrum
+            {
+                let samples = self.spectrum_pre.read();
+                for i in 0..FFT_SIZE {
+                    work.real[i] = samples[i] * self.window[i];
+                    work.imag[i] = 0.0;
+                }
+                let w = &mut *work;
+                spectrum::fft_in_place(&mut *w.real, &mut *w.imag);
+                let norm = 2.0 / FFT_SIZE as f32;
+                for i in 0..NUM_BINS {
+                    let re = w.real[i] * norm;
+                    let im = w.imag[i] * norm;
+                    let mag = (re * re + im * im).sqrt();
+                    w.pre_mag[i] = if mag > 1e-12 { 20.0 * mag.log10() } else { -120.0 };
+                }
             }
-            let w = &mut *work;
-            spectrum::fft_in_place(&mut *w.real, &mut *w.imag);
-            let norm = 2.0 / FFT_SIZE as f32;
-            for i in 0..NUM_BINS {
-                let re = w.real[i] * norm;
-                let im = w.imag[i] * norm;
-                let mag = (re * re + im * im).sqrt();
-                w.pre_mag[i] = if mag > 1e-12 { 20.0 * mag.log10() } else { -120.0 };
+
+            // Post-processing spectrum
+            {
+                let samples = self.spectrum_post.read();
+                for i in 0..FFT_SIZE {
+                    work.real[i] = samples[i] * self.window[i];
+                    work.imag[i] = 0.0;
+                }
+                let w = &mut *work;
+                spectrum::fft_in_place(&mut *w.real, &mut *w.imag);
+                let norm = 2.0 / FFT_SIZE as f32;
+                for i in 0..NUM_BINS {
+                    let re = w.real[i] * norm;
+                    let im = w.imag[i] * norm;
+                    let mag = (re * re + im * im).sqrt();
+                    w.post_mag[i] = if mag > 1e-12 { 20.0 * mag.log10() } else { -120.0 };
+                }
             }
         }
 
-        // Post-processing spectrum
-        {
-            let samples = self.spectrum_post.read();
-            for i in 0..FFT_SIZE {
-                work.real[i] = samples[i] * self.window[i];
-                work.imag[i] = 0.0;
-            }
-            let w = &mut *work;
-            spectrum::fft_in_place(&mut *w.real, &mut *w.imag);
-            let norm = 2.0 / FFT_SIZE as f32;
-            for i in 0..NUM_BINS {
-                let re = w.real[i] * norm;
-                let im = w.imag[i] * norm;
-                let mag = (re * re + im * im).sqrt();
-                w.post_mag[i] = if mag > 1e-12 { 20.0 * mag.log10() } else { -120.0 };
-            }
-        }
-
-        // ── Compute smoothed delta (asymmetric attack/release) ──
+        // ── Compute smoothed delta (asymmetric attack/release, always runs) ──
         // Noise gate: ignore delta when both pre and post are below this threshold.
         // This prevents phantom bumps at crossover boundaries during silence.
         const NOISE_FLOOR_DB: f32 = -90.0;

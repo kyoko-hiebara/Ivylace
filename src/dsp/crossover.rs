@@ -33,6 +33,24 @@ impl Biquad {
         self.s2 = 0.0;
     }
 
+    /// Configure as 2nd-order allpass at the given frequency.
+    /// An allpass has the same magnitude as the corresponding lowpass/highpass
+    /// but passes all frequencies with only phase shift.
+    /// H_ap(z) = (a2 + a1*z^-1 + z^-2) / (1 + a1*z^-1 + a2*z^-2)
+    fn set_allpass(&mut self, freq: f64, sample_rate: f64) {
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 * std::f64::consts::FRAC_1_SQRT_2;
+
+        let a0 = 1.0 + alpha;
+        self.b0 = (1.0 - alpha) / a0;
+        self.b1 = (-2.0 * cos_w0) / a0;
+        self.b2 = (1.0 + alpha) / a0;
+        self.a1 = (-2.0 * cos_w0) / a0;
+        self.a2 = (1.0 - alpha) / a0;
+    }
+
     /// Configure as 2nd-order Butterworth lowpass
     fn set_lowpass(&mut self, freq: f64, sample_rate: f64) {
         let w0 = 2.0 * PI * freq / sample_rate;
@@ -98,6 +116,11 @@ impl Lr4Filter {
         self.biquad2.set_highpass(freq, sample_rate);
     }
 
+    fn set_allpass(&mut self, freq: f64, sample_rate: f64) {
+        self.biquad1.set_allpass(freq, sample_rate);
+        self.biquad2.set_allpass(freq, sample_rate);
+    }
+
     #[inline(always)]
     fn process(&mut self, input: f64) -> f64 {
         let x = self.biquad1.process(input);
@@ -129,10 +152,24 @@ impl CrossoverPoint {
     }
 }
 
-/// Complete 4-band crossover (stereo)
+/// Complete 4-band crossover (stereo) with allpass phase compensation.
+///
+/// The tree-structured topology (mid split → sub-splits) introduces phase
+/// misalignment between the low-half and high-half branches because each
+/// branch only "sees" one of the two sub-crossover allpass responses.
+///
+/// Compensation: insert an LR4 allpass at the "other" crossover frequency
+/// into each branch so all 4 bands share the same total phase response:
+///   - Low-half  (Band 0, 1): add allpass at high crossover freq (xover[2])
+///   - High-half (Band 2, 3): add allpass at low crossover freq (xover[0])
 pub struct FourBandCrossover {
     /// [channel][crossover_index]
     crossovers: [[CrossoverPoint; NUM_CROSSOVERS]; 2],
+    /// Allpass compensation: low-half bands get allpass at high freq
+    /// [channel] — one LR4 allpass per channel
+    ap_low_half: [Lr4Filter; 2],
+    /// Allpass compensation: high-half bands get allpass at low freq
+    ap_high_half: [Lr4Filter; 2],
     sample_rate: f64,
 }
 
@@ -140,6 +177,8 @@ impl FourBandCrossover {
     pub fn new(sample_rate: f64) -> Self {
         Self {
             crossovers: [[CrossoverPoint::default(); NUM_CROSSOVERS]; 2],
+            ap_low_half: [Lr4Filter::default(), Lr4Filter::default()],
+            ap_high_half: [Lr4Filter::default(), Lr4Filter::default()],
             sample_rate,
         }
     }
@@ -149,6 +188,12 @@ impl FourBandCrossover {
             for xover in ch.iter_mut() {
                 xover.reset();
             }
+        }
+        for ap in &mut self.ap_low_half {
+            ap.reset();
+        }
+        for ap in &mut self.ap_high_half {
+            ap.reset();
         }
     }
 
@@ -160,10 +205,16 @@ impl FourBandCrossover {
     /// Set crossover frequencies: [low_freq, mid_freq, high_freq]
     /// e.g., [120.0, 1500.0, 8000.0]
     pub fn set_frequencies(&mut self, freqs: [f64; NUM_CROSSOVERS]) {
-        for ch in &mut self.crossovers {
+        for ch_idx in 0..2 {
+            let ch = &mut self.crossovers[ch_idx];
             for (i, &freq) in freqs.iter().enumerate() {
                 ch[i].set_frequency(freq, self.sample_rate);
             }
+            // Allpass compensation:
+            // Low-half (bands 0,1) gets allpass at high crossover freq
+            self.ap_low_half[ch_idx].set_allpass(freqs[2], self.sample_rate);
+            // High-half (bands 2,3) gets allpass at low crossover freq
+            self.ap_high_half[ch_idx].set_allpass(freqs[0], self.sample_rate);
         }
     }
 
@@ -175,22 +226,25 @@ impl FourBandCrossover {
         let mut out_l = [0.0f64; NUM_BANDS];
         let mut out_r = [0.0f64; NUM_BANDS];
 
-        // Split topology for 4 bands:
+        // Split topology for 4 bands with allpass phase compensation:
         //
-        //  input ─┬─ LP1 ─┬─ LP0 ─── Band 0 (Low)
-        //         │       └─ HP0 ─── Band 1 (LowMid)
-        //         └─ HP1 ─┬─ LP2 ─── Band 2 (HighMid)
-        //                 └─ HP2 ─── Band 3 (High)
+        //  input ─┬─ LP1 ─── AP_high ─┬─ LP0 ─── Band 0 (Low)
+        //         │                    └─ HP0 ─── Band 1 (LowMid)
+        //         └─ HP1 ─── AP_low  ─┬─ LP2 ─── Band 2 (HighMid)
+        //                             └─ HP2 ─── Band 3 (High)
         //
-        // Crossover 1 = mid frequency (splits low-half and high-half)
-        // Crossover 0 = low frequency (splits low-half into Low and LowMid)
-        // Crossover 2 = high frequency (splits high-half into HighMid and High)
+        // AP_high = LR4 allpass at high crossover freq (compensates xover[2] phase)
+        // AP_low  = LR4 allpass at low crossover freq  (compensates xover[0] phase)
 
         for (ch_idx, input) in [(0usize, left), (1usize, right)] {
             let xovers = &mut self.crossovers[ch_idx];
 
             // First split at mid frequency
             let (low_half, high_half) = xovers[1].process(input);
+
+            // Apply allpass compensation before sub-splits
+            let low_half = self.ap_low_half[ch_idx].process(low_half);
+            let high_half = self.ap_high_half[ch_idx].process(high_half);
 
             // Split low half at low frequency
             let (band0, band1) = xovers[0].process(low_half);
@@ -246,7 +300,7 @@ mod tests {
             let gain_db = 10.0 * (sum_sq_sum / sum_sq_input).log10();
             eprintln!("Crossover gain at {test_freq:>6.1}Hz: {gain_db:>+.4} dB");
             assert!(
-                gain_db.abs() < 1.0,
+                gain_db.abs() < 0.2,
                 "Crossover gain at {test_freq}Hz should be near 0dB, got {gain_db:.3}dB"
             );
         }
@@ -310,11 +364,10 @@ mod tests {
             }
 
             let gain_db = 10.0 * (sum_sq_sum / sum_sq_input).log10();
-            // Nested LR4 topology introduces small (~0.6dB) dips at crossover
-            // frequencies due to allpass phase interaction between stages.
-            // This is inherent to the tree-structured IIR crossover design.
+            // With allpass compensation, the nested LR4 topology sums closer
+            // to flat. Residual dips at crossover frequencies are < 0.6dB.
             assert!(
-                gain_db.abs() < 1.0,
+                gain_db.abs() < 0.6,
                 "Crossover gain at {test_freq}Hz should be near 0dB, got {gain_db:.3}dB"
             );
         }

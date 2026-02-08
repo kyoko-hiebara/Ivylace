@@ -39,44 +39,50 @@ impl OversamplingFactor {
 
 /// FIR lowpass filter for 2x oversampling.
 ///
-/// 15-tap symmetric half-band FIR. At the 2x rate, the cutoff is at
+/// 31-tap symmetric half-band FIR. At the 2x rate, the cutoff is at
 /// 0.25 * fs_2x = 0.5 * fs_original (i.e., original Nyquist).
 ///
-/// Full impulse response (symmetric, 15 taps, indices -7..+7):
-///   h[n] for n = 0..14, center at n=7
-///
-/// Designed with windowed-sinc (Kaiser, beta=4.5) then normalized for
-/// unity DC gain at the 2x rate.
-const FIR_TAPS: usize = 15;
-const FIR_HALF: usize = 7; // (FIR_TAPS - 1) / 2
+/// Designed with windowed-sinc (Kaiser, beta=5.0) then normalized for
+/// unity DC gain at the 2x rate. Provides ~43dB stopband attenuation,
+/// significantly improved over the previous 15-tap design.
+const FIR_TAPS: usize = 31;
 
-/// The 15-tap FIR coefficients (symmetric: coeff[k] == coeff[14-k]).
+/// The 31-tap FIR coefficients (symmetric: coeff[k] == coeff[30-k]).
 /// Normalized so sum = 1.0 (unity DC gain). The *2 gain for zero-stuffing
 /// compensation is applied to the input in the upsampler, not the filter.
-const FIR_COEFFS: [f64; FIR_TAPS] = {
-    // Start from windowed sinc for half-band lowpass (cutoff = π/2)
-    // h_ideal[n] = sin(π/2 * (n - 7)) / (π * (n - 7)) * kaiser(n, 15, 4.5)
-    // Then normalize sum to 0.5.
-    //
-    // Precomputed:
-    [
-        -0.002_077_586_698_498_6,  // n=0
-         0.0,                       // n=1
-         0.017_726_580_009_717_6,  // n=2
-         0.0,                       // n=3
-        -0.069_570_697_498_560_9,  // n=4
-         0.0,                       // n=5
-         0.303_921_704_187_342_0,  // n=6
-         0.500_000_000_000_000_0,  // n=7 (center tap)
-         0.303_921_704_187_342_0,  // n=8
-         0.0,                       // n=9
-        -0.069_570_697_498_560_9,  // n=10
-         0.0,                       // n=11
-         0.017_726_580_009_717_6,  // n=12
-         0.0,                       // n=13
-        -0.002_077_586_698_498_6,  // n=14
-    ]
-};
+const FIR_COEFFS: [f64; FIR_TAPS] = [
+    -7.791_947_961_902_591e-4,  // n=0
+     0.0,                        // n=1
+     2.945_245_808_728_370_7e-3, // n=2
+     0.0,                        // n=3
+    -7.205_187_307_471_956e-3,   // n=4
+     0.0,                        // n=5
+     1.467_733_128_675_513_5e-2, // n=6
+     0.0,                        // n=7
+    -2.725_783_726_130_591_8e-2, // n=8
+     0.0,                        // n=9
+     4.936_902_198_051_375_3e-2, // n=10
+     0.0,                        // n=11
+    -9.697_911_002_308_897e-2,   // n=12
+     0.0,                        // n=13
+     3.152_297_303_120_598e-1,   // n=14
+     0.5,                        // n=15 (center tap)
+     3.152_297_303_120_598e-1,   // n=16
+     0.0,                        // n=17
+    -9.697_911_002_308_897e-2,   // n=18
+     0.0,                        // n=19
+     4.936_902_198_051_375_3e-2, // n=20
+     0.0,                        // n=21
+    -2.725_783_726_130_591_8e-2, // n=22
+     0.0,                        // n=23
+     1.467_733_128_675_513_5e-2, // n=24
+     0.0,                        // n=25
+    -7.205_187_307_471_956e-3,   // n=26
+     0.0,                        // n=27
+     2.945_245_808_728_370_7e-3, // n=28
+     0.0,                        // n=29
+    -7.791_947_961_902_591e-4,   // n=30
+];
 
 /// 2x-rate delay line length for the FIR filter
 const DELAY_2X: usize = FIR_TAPS;

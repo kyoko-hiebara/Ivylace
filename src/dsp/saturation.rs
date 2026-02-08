@@ -47,7 +47,12 @@ pub struct BandSaturation {
     /// DC blocker state (remove DC offset from asymmetric clipping)
     dc_blocker_x1: f64,
     dc_blocker_y1: f64,
+    /// DC blocker coefficient: R = exp(-2π * fc / sr), fc = 5Hz
+    dc_blocker_r: f64,
 }
+
+/// DC blocker cutoff frequency in Hz
+const DC_BLOCKER_FC: f64 = 5.0;
 
 impl BandSaturation {
     pub fn new() -> Self {
@@ -58,12 +63,25 @@ impl BandSaturation {
             enabled: true,
             dc_blocker_x1: 0.0,
             dc_blocker_y1: 0.0,
+            dc_blocker_r: Self::compute_dc_blocker_r(44100.0),
         }
     }
 
     pub fn reset(&mut self) {
         self.dc_blocker_x1 = 0.0;
         self.dc_blocker_y1 = 0.0;
+    }
+
+    /// Update the DC blocker coefficient for the given sample rate.
+    /// Must be called when sample rate changes (including oversampling).
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.dc_blocker_r = Self::compute_dc_blocker_r(sample_rate);
+    }
+
+    /// Compute DC blocker R coefficient: R = exp(-2π * fc / sr)
+    #[inline(always)]
+    fn compute_dc_blocker_r(sample_rate: f64) -> f64 {
+        (-2.0 * std::f64::consts::PI * DC_BLOCKER_FC / sample_rate).exp()
     }
 
     pub fn set_drive(&mut self, drive: f64) {
@@ -95,12 +113,11 @@ impl BandSaturation {
         self.compensation = 1.0 / base;
     }
 
-    /// DC blocker (1st order highpass at ~5Hz)
+    /// DC blocker (1st order highpass at ~5Hz, sample-rate aware)
     #[inline(always)]
     fn dc_block(&mut self, input: f64) -> f64 {
-        // R = 0.9995 gives ~5Hz cutoff at 44.1kHz
-        const R: f64 = 0.9995;
-        let output = input - self.dc_blocker_x1 + R * self.dc_blocker_y1;
+        let r = self.dc_blocker_r;
+        let output = input - self.dc_blocker_x1 + r * self.dc_blocker_y1;
         self.dc_blocker_x1 = input;
         self.dc_blocker_y1 = output;
         output
@@ -132,18 +149,12 @@ impl BandSaturation {
     fn saturate_tape(x: f64, drive: f64) -> f64 {
         let input = x * (1.0 + drive * 4.0);
 
-        // Hyperbolic tangent approximation - classic tape saturation
-        // tanh provides symmetric soft clipping (odd harmonics)
-        // with natural compression behavior at high levels
-        let abs_x = input.abs().min(10.0);
-        let sign = if input >= 0.0 { 1.0 } else { -1.0 };
-
-        // Padé approximation of tanh for efficiency
-        if abs_x < 1.0 {
-            input * (1.0 - abs_x * abs_x / 3.0)
-        } else {
-            sign * input.tanh()
-        }
+        // Full tanh — classic tape saturation.
+        // Provides symmetric soft clipping (odd harmonics)
+        // with natural compression behavior at high levels.
+        // Previously used a Padé approximation for |x|<1 but it caused
+        // a ~0.1 value discontinuity at the crossover point |x|=1.
+        input.tanh()
     }
 
     /// Console-style saturation (very subtle, transformer + op-amp coloring)
@@ -173,14 +184,11 @@ impl BandSaturation {
             SaturationType::Console => Self::saturate_console(input, self.drive),
         };
 
-        // Apply compensation and mix
+        // Apply compensation (auto-gain to keep perceived level constant)
         let compensated = saturated * self.compensation;
 
-        // Wet/dry blend based on drive
-        let result = input * (1.0 - self.drive) + compensated * self.drive;
-
         // DC blocker (especially important for tube mode)
-        self.dc_block(result)
+        self.dc_block(compensated)
     }
 }
 
@@ -202,10 +210,10 @@ impl MultibandSaturation {
         bands[0].set_enabled(false);
         bands[0].set_drive(0.0);
 
-        // Default drives for other bands
-        bands[1].set_drive(0.3); // LowMid: light warmth
-        bands[2].set_drive(0.4); // HighMid: moderate presence
-        bands[3].set_drive(0.3); // High: light air
+        // Default drives for other bands (1.8dB/6 = 0.3, 2.4dB/6 = 0.4)
+        bands[1].set_drive(0.3); // LowMid: 1.8dB — light warmth
+        bands[2].set_drive(0.4); // HighMid: 2.4dB — moderate presence
+        bands[3].set_drive(0.3); // High: 1.8dB — light air
 
         Self { bands }
     }
@@ -213,6 +221,13 @@ impl MultibandSaturation {
     pub fn reset(&mut self) {
         for band in &mut self.bands {
             band.reset();
+        }
+    }
+
+    /// Update sample rate for all bands' DC blockers
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        for band in &mut self.bands {
+            band.set_sample_rate(sample_rate);
         }
     }
 

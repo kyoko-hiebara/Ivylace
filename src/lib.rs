@@ -2,13 +2,13 @@ use nih_plug::prelude::*;
 use nih_plug::formatters;
 use nih_plug_vizia::ViziaState;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 mod dsp;
 mod editor;
 use dsp::compressor::{SslCompressor, ATTACK_TIMES_MS, RATIOS, RELEASE_TIMES_MS};
 use dsp::crossover::FourBandCrossover;
-use dsp::gr_meter::{GrMeter, GrMeterOutputs};
+use dsp::gr_meter::{AtomicF32, GrMeter, GrMeterOutputs};
 use dsp::oversampling::{MultibandOversampler, OversamplingFactor};
 use dsp::saturation::{MultibandSaturation, SaturationType};
 use dsp::spectrum::SpectrumBuffer;
@@ -18,6 +18,236 @@ const BAND_NAMES: [&str; NUM_BANDS] = ["Low", "LowMid", "HighMid", "High"];
 
 /// GR meter update interval (every N samples) to reduce atomic store overhead
 const GR_METER_UPDATE_INTERVAL: u32 = 64;
+
+// ============================================================
+//  A/B Slot Storage — lock-free dual parameter slots
+// ============================================================
+
+/// One A/B slot storing all per-band compressor parameter values.
+/// Stored in native units so audio thread can use values directly.
+pub(crate) struct SlotStorage {
+    /// Per-band threshold in dB (-40..0)
+    pub threshold_db: [AtomicF32; NUM_BANDS],
+    /// Per-band attack index (0..5, maps to ATTACK_TIMES_MS)
+    pub attack_idx: [AtomicU32; NUM_BANDS],
+    /// Per-band release index (0..4, maps to RELEASE_TIMES_MS)
+    pub release_idx: [AtomicU32; NUM_BANDS],
+    /// Per-band ratio index (0..2, maps to RATIOS)
+    pub ratio_idx: [AtomicU32; NUM_BANDS],
+    /// Per-band makeup gain in dB (-12..24)
+    pub makeup_db: [AtomicF32; NUM_BANDS],
+    /// Per-band SC HPF frequency in Hz (0..500)
+    pub sc_hpf_hz: [AtomicF32; NUM_BANDS],
+}
+
+impl SlotStorage {
+    /// Create with default compressor param values.
+    pub fn new_with_defaults() -> Self {
+        Self {
+            threshold_db: [
+                AtomicF32::new(-20.0), AtomicF32::new(-20.0),
+                AtomicF32::new(-20.0), AtomicF32::new(-20.0),
+            ],
+            attack_idx: [
+                AtomicU32::new(4), AtomicU32::new(4), // A10 = index 4
+                AtomicU32::new(4), AtomicU32::new(4),
+            ],
+            release_idx: [
+                AtomicU32::new(1), AtomicU32::new(1), // R300 = index 1
+                AtomicU32::new(1), AtomicU32::new(1),
+            ],
+            ratio_idx: [
+                AtomicU32::new(1), AtomicU32::new(1), // Ratio4 = index 1
+                AtomicU32::new(1), AtomicU32::new(1),
+            ],
+            makeup_db: [
+                AtomicF32::new(0.0), AtomicF32::new(0.0),
+                AtomicF32::new(0.0), AtomicF32::new(0.0),
+            ],
+            sc_hpf_hz: [
+                AtomicF32::new(0.0), AtomicF32::new(80.0),
+                AtomicF32::new(80.0), AtomicF32::new(80.0),
+            ],
+        }
+    }
+
+    /// Snapshot current nih-plug parameter values into this slot.
+    pub fn load_from_params(&self, params: &IvylaceParams) {
+        for i in 0..NUM_BANDS {
+            let bp = &params.bands[i];
+
+            // threshold: Linear range -40..0 dB
+            let thr_norm = bp.threshold.unmodulated_normalized_value();
+            let thr_db = thr_norm * 40.0 - 40.0;
+            self.threshold_db[i].store(thr_db);
+
+            // Enum params: normalized → step index
+            let atk_norm = bp.attack.unmodulated_normalized_value();
+            self.attack_idx[i].store((atk_norm * 5.0).round() as u32, Ordering::Relaxed);
+
+            let rel_norm = bp.release.unmodulated_normalized_value();
+            self.release_idx[i].store((rel_norm * 4.0).round() as u32, Ordering::Relaxed);
+
+            let rat_norm = bp.ratio.unmodulated_normalized_value();
+            self.ratio_idx[i].store((rat_norm * 2.0).round() as u32, Ordering::Relaxed);
+
+            // makeup: Linear range -12..24 dB
+            let mkp_norm = bp.makeup.unmodulated_normalized_value();
+            let mkp_db = mkp_norm * 36.0 - 12.0;
+            self.makeup_db[i].store(mkp_db);
+
+            // sc_hpf: Skewed range 0..500 Hz, factor = 2^(-1.5)
+            // unnormalize: plain = norm^(1/factor) * (max-min) + min
+            let hpf_norm = bp.sc_hpf.unmodulated_normalized_value();
+            let skew_factor = 2.0f32.powf(-1.5); // same as FloatRange::skew_factor(-1.5)
+            let hpf_hz = hpf_norm.powf(skew_factor.recip()) * 500.0;
+            self.sc_hpf_hz[i].store(hpf_hz);
+        }
+    }
+
+    /// Get threshold as normalized value (0..1) for a band.
+    #[inline]
+    pub fn threshold_normalized(&self, band: usize) -> f32 {
+        // -40dB → 0.0, 0dB → 1.0
+        (self.threshold_db[band].load() + 40.0) / 40.0
+    }
+
+    /// Get makeup as normalized value (0..1) for a band.
+    #[inline]
+    pub fn makeup_normalized(&self, band: usize) -> f32 {
+        // -12dB → 0.0, 24dB → 1.0
+        (self.makeup_db[band].load() + 12.0) / 36.0
+    }
+
+    /// Get attack as normalized value for a band.
+    #[inline]
+    pub fn attack_normalized(&self, band: usize) -> f32 {
+        self.attack_idx[band].load(Ordering::Relaxed) as f32 / 5.0
+    }
+
+    /// Get release as normalized value for a band.
+    #[inline]
+    pub fn release_normalized(&self, band: usize) -> f32 {
+        self.release_idx[band].load(Ordering::Relaxed) as f32 / 4.0
+    }
+
+    /// Get ratio as normalized value for a band.
+    #[inline]
+    pub fn ratio_normalized(&self, band: usize) -> f32 {
+        self.ratio_idx[band].load(Ordering::Relaxed) as f32 / 2.0
+    }
+
+    /// Get SC HPF as normalized value for a band.
+    #[inline]
+    pub fn sc_hpf_normalized(&self, band: usize) -> f32 {
+        // Skewed range: normalize(plain) = ((plain - min) / (max - min)).powf(factor)
+        let hz = self.sc_hpf_hz[band].load();
+        let skew_factor = 2.0f32.powf(-1.5);
+        (hz / 500.0).clamp(0.0, 1.0).powf(skew_factor)
+    }
+
+    /// Reset all values to factory defaults (same as new_with_defaults).
+    pub fn reset_to_defaults(&self) {
+        for i in 0..NUM_BANDS {
+            self.threshold_db[i].store(-20.0);
+            self.attack_idx[i].store(4, Ordering::Relaxed);  // A10
+            self.release_idx[i].store(1, Ordering::Relaxed);  // R300
+            self.ratio_idx[i].store(1, Ordering::Relaxed);   // Ratio4
+            self.makeup_db[i].store(0.0);
+            self.sc_hpf_hz[i].store(if i == 0 { 0.0 } else { 80.0 });
+        }
+    }
+}
+
+/// Serializable snapshot of slot values for persistence.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SlotPersist {
+    pub threshold_db: [f32; NUM_BANDS],
+    pub attack_idx: [u32; NUM_BANDS],
+    pub release_idx: [u32; NUM_BANDS],
+    pub ratio_idx: [u32; NUM_BANDS],
+    pub makeup_db: [f32; NUM_BANDS],
+    pub sc_hpf_hz: [f32; NUM_BANDS],
+}
+
+impl SlotPersist {
+    fn from_slot(slot: &SlotStorage) -> Self {
+        let mut s = Self {
+            threshold_db: [0.0; NUM_BANDS],
+            attack_idx: [0; NUM_BANDS],
+            release_idx: [0; NUM_BANDS],
+            ratio_idx: [0; NUM_BANDS],
+            makeup_db: [0.0; NUM_BANDS],
+            sc_hpf_hz: [0.0; NUM_BANDS],
+        };
+        for i in 0..NUM_BANDS {
+            s.threshold_db[i] = slot.threshold_db[i].load();
+            s.attack_idx[i] = slot.attack_idx[i].load(Ordering::Relaxed);
+            s.release_idx[i] = slot.release_idx[i].load(Ordering::Relaxed);
+            s.ratio_idx[i] = slot.ratio_idx[i].load(Ordering::Relaxed);
+            s.makeup_db[i] = slot.makeup_db[i].load();
+            s.sc_hpf_hz[i] = slot.sc_hpf_hz[i].load();
+        }
+        s
+    }
+
+    fn apply_to_slot(&self, slot: &SlotStorage) {
+        for i in 0..NUM_BANDS {
+            slot.threshold_db[i].store(self.threshold_db[i]);
+            slot.attack_idx[i].store(self.attack_idx[i], Ordering::Relaxed);
+            slot.release_idx[i].store(self.release_idx[i], Ordering::Relaxed);
+            slot.ratio_idx[i].store(self.ratio_idx[i], Ordering::Relaxed);
+            slot.makeup_db[i].store(self.makeup_db[i]);
+            slot.sc_hpf_hz[i].store(self.sc_hpf_hz[i]);
+        }
+    }
+}
+
+/// Lock-free communication between audio thread (GR measurement) and GUI (AutoButton).
+///
+/// Flow: GUI sets attack/release from BPM input, then sets `active` →
+///       audio thread measures GR for 1 second → computes threshold adjustment →
+///       stores target_threshold + sets `params_ready` → GUI applies threshold.
+///       Repeats up to 3 iterations for convergence.
+pub(crate) struct AutoAnalysisState {
+    /// GUI→Audio: start GR measurement
+    pub active: AtomicBool,
+    /// Audio→GUI: measurement complete
+    pub done: AtomicBool,
+    /// Progress 0.0..1.0 for GUI animation
+    pub progress: AtomicF32,
+    /// Audio thread sets true when target threshold is computed
+    pub params_ready: AtomicBool,
+    /// GUI sets true after applying threshold
+    pub params_applied: AtomicBool,
+    /// Per-band average GR measured (dB, negative = compression)
+    pub avg_gr: [AtomicF32; NUM_BANDS],
+    /// Per-band target threshold (normalized 0..1)
+    pub target_threshold: [AtomicF32; NUM_BANDS],
+    /// Current convergence iteration (0, 1, 2)
+    pub iteration: AtomicU32,
+}
+
+impl AutoAnalysisState {
+    pub fn new() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            progress: AtomicF32::new(0.0),
+            params_ready: AtomicBool::new(false),
+            params_applied: AtomicBool::new(false),
+            avg_gr: [
+                AtomicF32::new(0.0), AtomicF32::new(0.0),
+                AtomicF32::new(0.0), AtomicF32::new(0.0),
+            ],
+            target_threshold: [
+                AtomicF32::new(0.0), AtomicF32::new(0.0),
+                AtomicF32::new(0.0), AtomicF32::new(0.0),
+            ],
+            iteration: AtomicU32::new(0),
+        }
+    }
+}
 
 // ============================================================
 //  Plugin struct
@@ -41,6 +271,18 @@ struct Ivylace {
     gr_update_counter: u32,
     /// Whether the host is currently rendering (offline bounce)
     is_rendering: bool,
+    /// Shared state for auto-analysis (audio thread ↔ GUI)
+    auto_state: Arc<AutoAnalysisState>,
+    /// GR accumulation for auto-threshold: sum of GR per band (reset each measurement)
+    auto_gr_sum: [f64; NUM_BANDS],
+    /// GR accumulation: sample count
+    auto_gr_count: u64,
+    /// GR measurement duration in samples (1 second)
+    auto_measure_samples: u64,
+    /// A/B slot A (manual settings)
+    slot_a: Arc<SlotStorage>,
+    /// A/B slot B (AUTO results)
+    slot_b: Arc<SlotStorage>,
 }
 
 // ============================================================
@@ -98,6 +340,19 @@ pub struct IvylaceParams {
     // --- Bypass ---
     #[id = "bypass"]
     pub bypass: BoolParam,
+
+    // --- A/B slot state ---
+    /// A/B mode: which slot is active (false=A, true=B)
+    #[persist = "ab-active-is-b"]
+    pub(crate) ab_active_is_b: Arc<AtomicBool>,
+
+    /// Slot A persistence
+    #[persist = "slot-a-data"]
+    pub(crate) slot_a_persist: std::sync::Mutex<SlotPersist>,
+
+    /// Slot B persistence
+    #[persist = "slot-b-data"]
+    pub(crate) slot_b_persist: std::sync::Mutex<SlotPersist>,
 }
 
 #[derive(Params)]
@@ -206,8 +461,39 @@ impl OversamplingParam {
 //  Parameter construction helpers
 // ============================================================
 
-fn make_band_params(band_idx: usize) -> BandParams {
+fn make_band_params(
+    band_idx: usize,
+    slot_a: &Arc<SlotStorage>,
+    slot_b: &Arc<SlotStorage>,
+    ab_is_b: &Arc<AtomicBool>,
+) -> BandParams {
     let name = BAND_NAMES[band_idx];
+
+    // Callback helper: write plain value to active slot's field
+    macro_rules! float_cb {
+        ($sa:expr, $sb:expr, $flag:expr, $idx:expr, $field:ident) => {{
+            let sa = $sa.clone();
+            let sb = $sb.clone();
+            let flag = $flag.clone();
+            let idx = $idx;
+            Arc::new(move |val: f32| {
+                let slot = if flag.load(Ordering::Relaxed) { &sb } else { &sa };
+                slot.$field[idx].store(val);
+            })
+        }};
+    }
+    macro_rules! enum_cb {
+        ($sa:expr, $sb:expr, $flag:expr, $idx:expr, $field:ident, $variant_to_idx:expr) => {{
+            let sa = $sa.clone();
+            let sb = $sb.clone();
+            let flag = $flag.clone();
+            let idx = $idx;
+            Arc::new(move |val| {
+                let slot = if flag.load(Ordering::Relaxed) { &sb } else { &sa };
+                slot.$field[idx].store($variant_to_idx(val), Ordering::Relaxed);
+            })
+        }};
+    }
 
     BandParams {
         threshold: FloatParam::new(
@@ -219,13 +505,20 @@ fn make_band_params(band_idx: usize) -> BandParams {
             },
         )
         .with_unit(" dB")
-        .with_step_size(0.1),
+        .with_step_size(0.1)
+        .with_callback(float_cb!(slot_a, slot_b, ab_is_b, band_idx, threshold_db)),
 
-        ratio: EnumParam::new(format!("{name} Ratio"), RatioParam::Ratio4),
+        ratio: EnumParam::new(format!("{name} Ratio"), RatioParam::Ratio4)
+            .with_callback(enum_cb!(slot_a, slot_b, ab_is_b, band_idx, ratio_idx,
+                |v: RatioParam| v as u32)),
 
-        attack: EnumParam::new(format!("{name} Attack"), AttackParam::A10),
+        attack: EnumParam::new(format!("{name} Attack"), AttackParam::A10)
+            .with_callback(enum_cb!(slot_a, slot_b, ab_is_b, band_idx, attack_idx,
+                |v: AttackParam| v as u32)),
 
-        release: EnumParam::new(format!("{name} Release"), ReleaseParam::R300),
+        release: EnumParam::new(format!("{name} Release"), ReleaseParam::R300)
+            .with_callback(enum_cb!(slot_a, slot_b, ab_is_b, band_idx, release_idx,
+                |v: ReleaseParam| v as u32)),
 
         makeup: FloatParam::new(
             format!("{name} Makeup"),
@@ -236,7 +529,8 @@ fn make_band_params(band_idx: usize) -> BandParams {
             },
         )
         .with_unit(" dB")
-        .with_step_size(0.1),
+        .with_step_size(0.1)
+        .with_callback(float_cb!(slot_a, slot_b, ab_is_b, band_idx, makeup_db)),
 
         sc_hpf: FloatParam::new(
             format!("{name} SC HPF"),
@@ -248,7 +542,8 @@ fn make_band_params(band_idx: usize) -> BandParams {
             },
         )
         .with_unit(" Hz")
-        .with_step_size(1.0),
+        .with_step_size(1.0)
+        .with_callback(float_cb!(slot_a, slot_b, ab_is_b, band_idx, sc_hpf_hz)),
 
         enabled: BoolParam::new(format!("{name} Comp Enabled"), true),
 
@@ -264,14 +559,14 @@ fn make_sat_band_params(band_idx: usize) -> SatBandParams {
     SatBandParams {
         drive: FloatParam::new(
             format!("{name} Sat Drive"),
-            if band_idx == 0 { 0.0 } else { 0.3 },
+            if band_idx == 0 { 0.0 } else { 1.8 },
             FloatRange::Linear {
                 min: 0.0,
-                max: 1.0,
+                max: 6.0,
             },
         )
-        .with_unit("")
-        .with_step_size(0.01),
+        .with_unit(" dB")
+        .with_step_size(0.1),
 
         // Low band saturation OFF by default for EDM!
         enabled: BoolParam::new(format!("{name} Sat Enabled"), band_idx != 0),
@@ -284,6 +579,22 @@ fn make_sat_band_params(band_idx: usize) -> SatBandParams {
 
 impl Default for Ivylace {
     fn default() -> Self {
+        // Create A/B slots and state FIRST so param callbacks can reference them
+        let slot_a = Arc::new(SlotStorage::new_with_defaults());
+        let slot_b = Arc::new(SlotStorage::new_with_defaults());
+        let ab_is_b = Arc::new(AtomicBool::new(false));
+        let auto_state = Arc::new(AutoAnalysisState::new());
+
+        // Default slot persist values (match SlotStorage::new_with_defaults)
+        let default_persist = SlotPersist {
+            threshold_db: [-20.0; NUM_BANDS],
+            attack_idx: [4; NUM_BANDS], // A10
+            release_idx: [1; NUM_BANDS], // R300
+            ratio_idx: [1; NUM_BANDS], // Ratio4
+            makeup_db: [0.0; NUM_BANDS],
+            sc_hpf_hz: [0.0, 80.0, 80.0, 80.0],
+        };
+
         Self {
             params: Arc::new(IvylaceParams {
                 editor_state: editor::default_state(),
@@ -362,10 +673,10 @@ impl Default for Ivylace {
                 .with_step_size(1.0),
 
                 bands: [
-                    make_band_params(0),
-                    make_band_params(1),
-                    make_band_params(2),
-                    make_band_params(3),
+                    make_band_params(0, &slot_a, &slot_b, &ab_is_b),
+                    make_band_params(1, &slot_a, &slot_b, &ab_is_b),
+                    make_band_params(2, &slot_a, &slot_b, &ab_is_b),
+                    make_band_params(3, &slot_a, &slot_b, &ab_is_b),
                 ],
 
                 sat_type: EnumParam::new("Saturation Type", SatTypeParam::Console),
@@ -382,6 +693,10 @@ impl Default for Ivylace {
 
                 bypass: BoolParam::new("Bypass", false)
                     .make_bypass(),
+
+                ab_active_is_b: ab_is_b,
+                slot_a_persist: std::sync::Mutex::new(default_persist.clone()),
+                slot_b_persist: std::sync::Mutex::new(default_persist),
             }),
             crossover: FourBandCrossover::new(44100.0),
             compressors: [
@@ -404,6 +719,12 @@ impl Default for Ivylace {
             current_sample_rate: 44100.0,
             gr_update_counter: 0,
             is_rendering: false,
+            auto_state,
+            auto_gr_sum: [0.0; NUM_BANDS],
+            auto_gr_count: 0,
+            auto_measure_samples: 44100,
+            slot_a,
+            slot_b,
         }
     }
 }
@@ -444,7 +765,10 @@ impl Plugin for Ivylace {
             self.spectrum_pre.clone(),
             self.spectrum_post.clone(),
             self.current_sample_rate,
+            self.auto_state.clone(),
             self.params.editor_state.clone(),
+            self.slot_a.clone(),
+            self.slot_b.clone(),
         )
     }
 
@@ -463,7 +787,24 @@ impl Plugin for Ivylace {
         for meter in &mut self.gr_meters {
             meter.set_sample_rate(sr);
         }
+        self.auto_measure_samples = sr as u64; // 1 second
         self.is_rendering = buffer_config.process_mode == ProcessMode::Offline;
+
+        // Restore A/B slot data from persistence (nih-plug deserializes #[persist] fields
+        // before calling initialize)
+        if let Ok(persist) = self.params.slot_a_persist.lock() {
+            persist.apply_to_slot(&self.slot_a);
+        }
+        if let Ok(persist) = self.params.slot_b_persist.lock() {
+            persist.apply_to_slot(&self.slot_b);
+        }
+
+        // If slot A is active and this is the first load (slot might be defaults),
+        // sync slot A from current nih-plug params (which may have been restored by the host)
+        if !self.params.ab_active_is_b.load(Ordering::Relaxed) {
+            self.slot_a.load_from_params(&self.params);
+        }
+
         true
     }
 
@@ -478,6 +819,8 @@ impl Plugin for Ivylace {
             meter.reset();
         }
         self.gr_update_counter = 0;
+        self.auto_gr_sum = [0.0; NUM_BANDS];
+        self.auto_gr_count = 0;
     }
 
     fn process(
@@ -507,37 +850,13 @@ impl Plugin for Ivylace {
         for comp in &mut self.compressors {
             comp.set_sample_rate(effective_sr);
         }
+        // Saturation DC blocker also needs effective (oversampled) sample rate
+        self.saturation.set_sample_rate(effective_sr);
 
-        // Read parameters
-        let input_gain_db = self.params.input_gain.smoothed.next();
-        let output_gain_db = self.params.output_gain.smoothed.next();
-        let dry_wet = self.params.dry_wet.smoothed.next();
+        // Read non-smoothed parameters once per block
         let delta_monitor = self.params.delta_monitor.load(std::sync::atomic::Ordering::Relaxed);
 
-        let input_gain = 10.0_f64.powf(input_gain_db as f64 / 20.0);
-        let output_gain = 10.0_f64.powf(output_gain_db as f64 / 20.0);
-
-        // Update crossover frequencies
-        let xover_freqs = [
-            self.params.xover_low.smoothed.next() as f64,
-            self.params.xover_mid.smoothed.next() as f64,
-            self.params.xover_high.smoothed.next() as f64,
-        ];
-        self.crossover.set_frequencies(xover_freqs);
-
-        // Update compressor parameters per band
-        for (i, band_params) in self.params.bands.iter().enumerate() {
-            let comp = &mut self.compressors[i];
-            comp.set_threshold(band_params.threshold.smoothed.next() as f64);
-            comp.set_ratio(RATIOS[band_params.ratio.value() as usize]);
-            comp.set_attack_ms(ATTACK_TIMES_MS[band_params.attack.value() as usize]);
-            comp.set_release_ms(RELEASE_TIMES_MS[band_params.release.value() as usize]);
-            comp.set_makeup_db(band_params.makeup.smoothed.next() as f64);
-            comp.set_sidechain_hpf(band_params.sc_hpf.smoothed.next() as f64);
-            comp.set_enabled(band_params.enabled.value());
-        }
-
-        // Update saturation parameters
+        // Stepped enum params (don't need per-sample smoothing)
         let sat_type = match self.params.sat_type.value() {
             SatTypeParam::Console => SaturationType::Console,
             SatTypeParam::Tube => SaturationType::Tube,
@@ -545,16 +864,70 @@ impl Plugin for Ivylace {
         };
         self.saturation.set_global_type(sat_type);
 
+        // Read A/B slot — all per-band compressor params come from the active slot
+        let use_slot_b = self.params.ab_active_is_b.load(Ordering::Relaxed);
+        let active_slot = if use_slot_b { &self.slot_b } else { &self.slot_a };
+
+        // Per-band non-smoothed params from active slot
+        for (i, band_params) in self.params.bands.iter().enumerate() {
+            let atk_idx = active_slot.attack_idx[i].load(Ordering::Relaxed) as usize;
+            self.compressors[i].set_attack_ms(ATTACK_TIMES_MS[atk_idx.min(ATTACK_TIMES_MS.len() - 1)]);
+
+            let rel_idx = active_slot.release_idx[i].load(Ordering::Relaxed) as usize;
+            self.compressors[i].set_release_ms(RELEASE_TIMES_MS[rel_idx.min(RELEASE_TIMES_MS.len() - 1)]);
+
+            let rat_idx = active_slot.ratio_idx[i].load(Ordering::Relaxed) as usize;
+            self.compressors[i].set_ratio(RATIOS[rat_idx.min(RATIOS.len() - 1)]);
+
+            self.compressors[i].set_enabled(band_params.enabled.value());
+        }
         for (i, sat_params) in self.params.sat_bands.iter().enumerate() {
-            self.saturation.bands[i].set_drive(sat_params.drive.smoothed.next() as f64);
             self.saturation.bands[i].set_enabled(sat_params.enabled.value());
         }
 
         // Check for solo
         let any_solo = self.params.bands.iter().any(|b| b.solo.value());
 
-        // Process audio
+        // Crossover frequencies: update once per block (per-sample is too expensive —
+        // set_frequencies() calls sin/cos for each biquad, and coefficient jitter can
+        // cause filter instability). Crossover freqs change slowly during automation,
+        // so block-rate updates are sufficient.
+        // Use next_step(block_len) to advance the smoother by the entire block length
+        // in one call, so it stays synchronized with the audio clock.
+        let block_len = buffer.samples() as u32;
+        let xover_freqs = [
+            self.params.xover_low.smoothed.next_step(block_len) as f64,
+            self.params.xover_mid.smoothed.next_step(block_len) as f64,
+            self.params.xover_high.smoothed.next_step(block_len) as f64,
+        ];
+        self.crossover.set_frequencies(xover_freqs);
+
+        // Process audio — smoothed parameters are read per-sample inside the loop
         for mut channel_samples in buffer.iter_samples() {
+            // Per-sample smoothed parameters (prevents zipper noise at large block sizes)
+            let input_gain_db = self.params.input_gain.smoothed.next();
+            let output_gain_db = self.params.output_gain.smoothed.next();
+            let dry_wet = self.params.dry_wet.smoothed.next();
+
+            let input_gain = (input_gain_db as f64 * std::f64::consts::LN_10 / 20.0).exp();
+            let output_gain = (output_gain_db as f64 * std::f64::consts::LN_10 / 20.0).exp();
+
+            // Per-band params from active slot (threshold, makeup, sc_hpf)
+            for (i, band_params) in self.params.bands.iter().enumerate() {
+                self.compressors[i].set_threshold(active_slot.threshold_db[i].load() as f64);
+                self.compressors[i].set_makeup_db(active_slot.makeup_db[i].load() as f64);
+                self.compressors[i].set_sidechain_hpf(active_slot.sc_hpf_hz[i].load() as f64);
+                // Advance nih-plug smoothers to keep them in sync with audio clock
+                let _ = band_params.threshold.smoothed.next();
+                let _ = band_params.makeup.smoothed.next();
+                let _ = band_params.sc_hpf.smoothed.next();
+            }
+            for (i, sat_params) in self.params.sat_bands.iter().enumerate() {
+                // Convert dB (0..6) to linear drive (0..1)
+                let drive_db = sat_params.drive.smoothed.next() as f64;
+                self.saturation.bands[i].set_drive(drive_db / 6.0);
+            }
+
             let left_in = *channel_samples.get_mut(0).unwrap() as f64 * input_gain;
             let right_in = *channel_samples.get_mut(1).unwrap() as f64 * input_gain;
 
@@ -646,7 +1019,7 @@ impl Plugin for Ivylace {
                  dry_r * (1.0 - mix) + out_r * mix)
             };
 
-            // Output gain
+            // Output gain (output_gain already computed per-sample above)
             let out_sample_l = (final_l * output_gain) as f32;
             let out_sample_r = (final_r * output_gain) as f32;
             *channel_samples.get_mut(0).unwrap() = out_sample_l;
@@ -666,6 +1039,53 @@ impl Plugin for Ivylace {
             if self.gr_update_counter >= GR_METER_UPDATE_INTERVAL {
                 self.gr_update_counter = 0;
                 self.gr_meter_outputs.update_from_meters(&self.gr_meters);
+            }
+
+            // Auto-threshold: accumulate GR for 1 second, then compute threshold adjustment.
+            // GUI sets active after setting attack/release from BPM input.
+            if self.auto_state.active.load(Ordering::Relaxed) {
+                // Accumulate per-band GR
+                for i in 0..NUM_BANDS {
+                    self.auto_gr_sum[i] += self.compressors[i].gain_reduction_db();
+                }
+                self.auto_gr_count += 1;
+
+                // Progress update
+                let progress = (self.auto_gr_count as f32 / self.auto_measure_samples as f32).min(1.0);
+                self.auto_state.progress.store(progress);
+
+                // 1 second measured → compute threshold adjustment
+                if self.auto_gr_count >= self.auto_measure_samples {
+                    const TARGET_GR: f64 = -2.5;
+
+                    for i in 0..NUM_BANDS {
+                        let avg_gr = self.auto_gr_sum[i] / self.auto_gr_count as f64;
+                        self.auto_state.avg_gr[i].store(avg_gr as f32);
+
+                        // error > 0 → not enough compression → lower threshold
+                        // error < 0 → too much compression → raise threshold
+                        let error = avg_gr - TARGET_GR;
+
+                        // Read current threshold from slot B (AUTO target)
+                        let current_threshold_db = self.slot_b.threshold_db[i].load() as f64;
+
+                        // Adjust: damped step (0.7× error)
+                        let new_threshold_db = (current_threshold_db - error * 0.7).clamp(-40.0, 0.0);
+                        let threshold_norm = ((new_threshold_db + 40.0) / 40.0) as f32;
+                        self.auto_state.target_threshold[i].store(threshold_norm);
+                        // Update slot B directly so next iteration reads the new value
+                        self.slot_b.threshold_db[i].store(new_threshold_db as f32);
+                    }
+
+                    // Reset accumulators
+                    self.auto_gr_sum = [0.0; NUM_BANDS];
+                    self.auto_gr_count = 0;
+
+                    // Signal completion
+                    self.auto_state.params_ready.store(true, Ordering::Release);
+                    self.auto_state.done.store(true, Ordering::Release);
+                    self.auto_state.active.store(false, Ordering::Release);
+                }
             }
         }
 

@@ -36,6 +36,13 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 - DC blocker on each band to prevent DC offset from asymmetric clipping
 - **2x/4x oversampling** for anti-aliased saturation
 
+### AUTO Threshold & A/B Slots
+- **AUTO threshold detection** — RMS-based analysis sets optimal threshold per band automatically
+- **A/B parameter slots** — instant comparison between manual (A) and AUTO (B) settings
+  - All per-band compressor params stored in lock-free dual slots
+  - Click A/B button to toggle, settings persist per session
+- **INIT button** — reset all compressor parameters in active slot to factory defaults
+
 ### GUI
 - **Dark / Glass dual theme** — switchable via header toggle, persisted per session
   - Dark: purple-tinted glassmorphism with gradient background
@@ -86,20 +93,22 @@ Requires Rust stable 1.75+.
 
 ```
 src/
-├── lib.rs                  # Plugin entry point, parameters, process()
+├── lib.rs                  # Plugin entry point, parameters, process(), A/B slot storage
 ├── editor/                 # VIZIA GUI (custom widgets, femtovg drawing)
 │   ├── mod.rs              # Editor entry, Data lens model, title bar, background gradient
 │   ├── theme.rs            # ~45 color functions, Dark/Glass dual theme
-│   ├── knob.rs             # GlassKnob rotary control (3 sizes)
+│   ├── knob.rs             # GlassKnob rotary control (3 sizes, slot-aware display)
 │   ├── meter.rs            # GR meters: digital bar + analog needle gauge
 │   ├── crossover.rs        # Crossover frequency display with draggable handles
-│   ├── segmented.rs        # Stepped enum control (Ratio/Attack/Release/Sat Type/OS)
+│   ├── segmented.rs        # Stepped enum control (Ratio/Attack/Release/Sat Type/OS, slot-aware)
 │   ├── toggle.rs           # Toggle button (LINK/Power/Solo/SAT)
-│   ├── band_strip.rs       # Per-band strip layout
-│   ├── header.rs           # Global controls bar + theme toggle + delta monitor
+│   ├── band_strip.rs       # Per-band strip layout (slot-aware)
+│   ├── header.rs           # Global controls bar + theme toggle + delta monitor + A/B + INIT
 │   ├── spectrum.rs         # Delta spectrum analyzer (pre/post difference display)
 │   ├── about.rs            # About dialog overlay (theme-dependent logo)
-│   └── pets.rs             # Walking pets easter egg (chick + cat, femtovg paths)
+│   ├── pets.rs             # Walking pets easter egg (chick + cat, femtovg paths)
+│   ├── auto_button.rs      # AUTO threshold analysis trigger + overlay
+│   └── ab_toggle.rs        # A/B slot switch + INIT parameter reset button
 ├── dsp/
 │   ├── mod.rs
 │   ├── crossover.rs        # LR4 4-band crossover
@@ -107,7 +116,8 @@ src/
 │   ├── saturation.rs       # Per-band analog saturation (Console/Tube/Tape)
 │   ├── oversampling.rs     # 2x/4x oversampling (halfband FIR, zero-stuffing)
 │   ├── gr_meter.rs         # Gain reduction metering (lock-free)
-│   └── spectrum.rs         # FFT + lock-free spectrum buffer
+│   ├── spectrum.rs         # FFT + lock-free spectrum buffer
+│   └── auto_detect.rs      # AUTO threshold detection (RMS analysis)
 └── assets/
     └── noto_sans_jp_kana.ttf  # Japanese font subset for About dialog
 ```

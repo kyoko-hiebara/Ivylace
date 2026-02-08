@@ -6,13 +6,13 @@ use std::sync::atomic::Ordering;
 
 use nih_plug_vizia::vizia::prelude::*;
 
-use super::knob::{GlassKnob, KnobSize};
+use super::knob::{GlassKnob, KnobSize, SlotParamKind, SlotValueSource};
 use super::meter::{GrMeterWidget, AnalogGrMeter};
-use super::segmented::SegmentedParam;
+use super::segmented::{SegmentedParam, SlotEnumKind, SlotEnumSource};
 use super::toggle::{ToggleButton, ToggleVariant};
 use super::theme::{self, ThemeMode};
 use super::Data;
-use crate::IvylaceParams;
+use crate::{IvylaceParams, SlotStorage};
 
 fn mode_lens() -> impl Lens<Target = ThemeMode> {
     Data::params.map(|p| {
@@ -23,8 +23,15 @@ fn mode_lens() -> impl Lens<Target = ThemeMode> {
 pub struct BandStrip;
 
 impl BandStrip {
-    pub fn new(cx: &mut Context, band_idx: usize, all_params: Arc<IvylaceParams>) -> Handle<'_, Self> {
+    pub fn new(
+        cx: &mut Context,
+        band_idx: usize,
+        all_params: Arc<IvylaceParams>,
+        slot_a: Arc<SlotStorage>,
+        slot_b: Arc<SlotStorage>,
+    ) -> Handle<'_, Self> {
         let glass_mode = all_params.glass_mode.clone();
+        let ab_is_b = all_params.ab_active_is_b.clone();
         let color = theme::band_color(band_idx, ThemeMode::Dark);
 
         Self.build(cx, move |cx| {
@@ -66,44 +73,66 @@ impl BandStrip {
                     .width(Stretch(1.0));
                 }
 
-                // ── Threshold knob ──
-                GlassKnob::new_with_link(
+                // ── Threshold knob (with link + slot value) ──
+                GlassKnob::new_full(
                     cx,
                     Data::params,
                     move |p| &p.bands[band_idx].threshold,
                     KnobSize::Md,
                     color,
                     "Threshold",
-                    all_params.clone(),
-                    band_idx,
                     gm.clone(),
+                    Some(all_params.clone()),
+                    band_idx,
+                    Some(SlotValueSource {
+                        slot_a: slot_a.clone(),
+                        slot_b: slot_b.clone(),
+                        is_b: ab_is_b.clone(),
+                        kind: SlotParamKind::ThresholdDb,
+                        band_idx,
+                    }),
                 )
                 .left(Stretch(1.0))
                 .right(Stretch(1.0));
 
-                // ── Ratio / Attack / Release (grouped) ──
+                // ── Ratio / Attack / Release (grouped with slot sources) ──
                 let gm2 = gm.clone();
+                let sa2 = slot_a.clone();
+                let sb2 = slot_b.clone();
+                let ab2 = ab_is_b.clone();
                 VStack::new(cx, move |cx| {
-                    SegmentedParam::new(
+                    SegmentedParam::new_with_slot(
                         cx,
                         Data::params,
                         move |p| &p.bands[band_idx].ratio,
                         Some("RATIO"),
                         gm2.clone(),
+                        Some(SlotEnumSource {
+                            slot_a: sa2.clone(), slot_b: sb2.clone(),
+                            is_b: ab2.clone(), kind: SlotEnumKind::Ratio, band_idx,
+                        }),
                     );
-                    SegmentedParam::new(
+                    SegmentedParam::new_with_slot(
                         cx,
                         Data::params,
                         move |p| &p.bands[band_idx].attack,
                         Some("ATTACK"),
                         gm2.clone(),
+                        Some(SlotEnumSource {
+                            slot_a: sa2.clone(), slot_b: sb2.clone(),
+                            is_b: ab2.clone(), kind: SlotEnumKind::Attack, band_idx,
+                        }),
                     );
-                    SegmentedParam::new(
+                    SegmentedParam::new_with_slot(
                         cx,
                         Data::params,
                         move |p| &p.bands[band_idx].release,
                         Some("RELEASE"),
                         gm2.clone(),
+                        Some(SlotEnumSource {
+                            slot_a: sa2.clone(), slot_b: sb2.clone(),
+                            is_b: ab2.clone(), kind: SlotEnumKind::Release, band_idx,
+                        }),
                     );
                 })
                 .row_between(Pixels(15.0))
@@ -111,10 +140,13 @@ impl BandStrip {
                 .right(Pixels(3.0))
                 .width(Stretch(1.0));
 
-                // ── Makeup + SC HPF ──
+                // ── Makeup + SC HPF (with slot values) ──
                 let gm3 = gm.clone();
+                let sa3 = slot_a.clone();
+                let sb3 = slot_b.clone();
+                let ab3 = ab_is_b.clone();
                 HStack::new(cx, move |cx| {
-                    GlassKnob::new(
+                    GlassKnob::new_full(
                         cx,
                         Data::params,
                         move |p| &p.bands[band_idx].makeup,
@@ -122,8 +154,14 @@ impl BandStrip {
                         color,
                         "Makeup",
                         gm3.clone(),
+                        None,
+                        band_idx,
+                        Some(SlotValueSource {
+                            slot_a: sa3.clone(), slot_b: sb3.clone(),
+                            is_b: ab3.clone(), kind: SlotParamKind::MakeupDb, band_idx,
+                        }),
                     );
-                    GlassKnob::new(
+                    GlassKnob::new_full(
                         cx,
                         Data::params,
                         move |p| &p.bands[band_idx].sc_hpf,
@@ -131,6 +169,12 @@ impl BandStrip {
                         color,
                         "SC HPF",
                         gm3.clone(),
+                        None,
+                        band_idx,
+                        Some(SlotValueSource {
+                            slot_a: sa3.clone(), slot_b: sb3.clone(),
+                            is_b: ab3.clone(), kind: SlotParamKind::ScHpfHz, band_idx,
+                        }),
                     );
                 })
                 .col_between(Pixels(2.0))
