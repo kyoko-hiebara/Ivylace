@@ -21,7 +21,7 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 ### 4-Band Crossover
 - **Linkwitz-Riley 4th order (LR4, 24dB/oct)** for phase-coherent band splitting
 - Adjustable crossover frequencies:
-  - Low: 20-500 Hz (default: 120 Hz)
+  - Low: 30-500 Hz (default: 120 Hz)
   - Mid: 200-5000 Hz (default: 1500 Hz)
   - High: 2000-18000 Hz (default: 8000 Hz)
 - Draggable crossover handles in GUI
@@ -40,11 +40,13 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 - **Dark / Glass dual theme** — switchable via header toggle, persisted per session
   - Dark: purple-tinted glassmorphism with gradient background
   - Glass: sky blue (#89c3eb) tinted light theme with near-white background
-- **Custom GPU-rendered widgets** — glassmorphism knobs, GR meters, crossover display
+- **Custom GPU-rendered widgets** — glassmorphism knobs, GR meters (digital bar + analog needle gauge), crossover display
+- **Analog needle GR meter** — semicircular VU-style gauge per band with VU-like ballistics
 - **Delta spectrum analyzer** — real-time pre/post difference display (cut=blue, boost=orange), ±6dB range
+- **Delta monitor** — audition wet−dry difference via header toggle
 - **About dialog** — click title bar to view logo, version, and author info (theme-dependent logo)
 - **DAW bypass support** — VST3 bypass button (Cubase, etc.)
-- **Resizable window** (960 x 740 default)
+- **Resizable window** (960 x 820 default)
 
 ### Band Layout
 | Band | Range | Default Saturation |
@@ -88,12 +90,12 @@ src/
 │   ├── mod.rs              # Editor entry, Data lens model, title bar, background gradient
 │   ├── theme.rs            # ~45 color functions, Dark/Glass dual theme
 │   ├── knob.rs             # GlassKnob rotary control (3 sizes)
-│   ├── meter.rs            # GR meter widget
+│   ├── meter.rs            # GR meters: digital bar + analog needle gauge
 │   ├── crossover.rs        # Crossover frequency display with draggable handles
 │   ├── segmented.rs        # Stepped enum control (Ratio/Attack/Release/Sat Type/OS)
 │   ├── toggle.rs           # Toggle button (LINK/Power/Solo/SAT)
 │   ├── band_strip.rs       # Per-band strip layout
-│   ├── header.rs           # Global controls bar + theme toggle (sun/moon)
+│   ├── header.rs           # Global controls bar + theme toggle + delta monitor
 │   ├── spectrum.rs         # Delta spectrum analyzer (pre/post difference display)
 │   └── about.rs            # About dialog overlay (theme-dependent logo)
 ├── dsp/

@@ -7,10 +7,10 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Smoothing time constants
-const ATTACK_MS: f64 = 0.1;   // Fast attack to catch peaks
-const RELEASE_MS: f64 = 300.0; // Slow release for readability
-const PEAK_HOLD_MS: f64 = 500.0; // Peak hold time before decay
+/// Smoothing time constants (VU-like ballistics for readable metering)
+const ATTACK_MS: f64 = 10.0;   // Smooth attack — avoids jittery needle
+const RELEASE_MS: f64 = 600.0; // Slow release for readability
+const PEAK_HOLD_MS: f64 = 800.0; // Peak hold time before decay
 
 /// Per-band gain reduction meter
 #[derive(Clone)]

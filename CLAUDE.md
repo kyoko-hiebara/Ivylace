@@ -36,7 +36,7 @@ ivylace/
     │   ├── mod.rs          # Editor entry: create(), default_state(), Data lens model, title bar, BackgroundGradient
     │   ├── theme.rs        # Color functions (~45 functions), Dark/Glass dual theme
     │   ├── knob.rs         # GlassKnob: custom rotary knob (3 sizes)
-    │   ├── meter.rs        # GrMeterWidget: vertical GR meter
+    │   ├── meter.rs        # GrMeterWidget (vertical bar) + AnalogGrMeter (needle gauge)
     │   ├── crossover.rs    # CrossoverDisplay: log-freq band display, draggable handles
     │   ├── segmented.rs    # SegmentedParam: stepped enum control
     │   ├── toggle.rs       # ToggleButton: bool param toggle (Normal/Solo/Sat/Power)
@@ -203,7 +203,7 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Linux は対象外
 - タグ `v*` プッシュで GitHub Release (draft) 自動作成
 
-## Current State (v0.5.2)
+## Current State (v0.5.3)
 
 ### Implemented
 - 4-band LR4 crossover with adjustable frequencies
@@ -215,9 +215,9 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Global dry/wet, input/output gain
 - VST3 + CLAP export
 - Full VIZIA GUI with custom widgets:
-  - GlassKnob (3 sizes), GR meters, crossover display
+  - GlassKnob (3 sizes), GR meters (digital bar + analog needle), crossover display
   - Segmented controls, toggle buttons
-  - Header with global controls + theme toggle
+  - Header with global controls + theme toggle + delta monitor
 - **Delta spectrum analyzer** (v0.5.0)
   - Pre/post processing difference display (cut=blue, boost=orange)
   - 8192-point in-crate FFT, 1/3 octave smoothing, asymmetric attack/release
@@ -238,6 +238,8 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **Delta monitor** (v0.5.2): audition wet−dry difference via header toggle button
 - **Sidechain HPF fix** (v0.5.2): corrected Butterworth Q factor (was resonant Q=√2, now flat Q=1/√2)
 - **Display range 30Hz+** (v0.5.2): spectrum/crossover display and crossover slider start at 30Hz to avoid sub-bass visual artifacts
+- **Analog needle GR meter** (v0.5.3): semicircular VU-style gauge per band alongside digital bar meter
+- **VU-like meter ballistics** (v0.5.3): smoother attack (10ms) and slower release (600ms) for readable metering
 
 ### TODO
 

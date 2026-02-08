@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use nih_plug_vizia::vizia::prelude::*;
 
 use super::knob::{GlassKnob, KnobSize};
-use super::meter::GrMeterWidget;
+use super::meter::{GrMeterWidget, AnalogGrMeter};
 use super::segmented::SegmentedParam;
 use super::toggle::{ToggleButton, ToggleVariant};
 use super::theme::{self, ThemeMode};
@@ -47,13 +47,23 @@ impl BandStrip {
                     .width(Stretch(1.0))
                     .height(Pixels(20.0));
 
-                // ── GR Meter ──
+                // ── GR Meters (digital bar + analog needle) ──
                 {
-                    let level_lens = Data::gr_outputs.map(move |o| o.band_gr[band_idx].load());
-                    let peak_lens = Data::gr_outputs.map(move |o| o.band_peak_gr[band_idx].load());
-                    GrMeterWidget::new(cx, level_lens, peak_lens, gm.clone())
-                        .left(Stretch(1.0))
-                        .right(Stretch(1.0));
+                    let gm_meter = gm.clone();
+                    HStack::new(cx, move |cx| {
+                        let level_lens = Data::gr_outputs.map(move |o| o.band_gr[band_idx].load());
+                        let peak_lens = Data::gr_outputs.map(move |o| o.band_peak_gr[band_idx].load());
+                        GrMeterWidget::new(cx, level_lens, peak_lens, gm_meter.clone());
+
+                        let analog_lens = Data::gr_outputs.map(move |o| o.band_gr[band_idx].load());
+                        AnalogGrMeter::new(cx, analog_lens, gm_meter.clone());
+                    })
+                    .col_between(Pixels(10.0))
+                    .child_left(Stretch(1.0))
+                    .child_right(Stretch(1.0))
+                    .child_bottom(Stretch(1.0))
+                    .height(Auto)
+                    .width(Stretch(1.0));
                 }
 
                 // ── Threshold knob ──

@@ -332,6 +332,33 @@ pub fn meter_shadow(mode: ThemeMode) -> vg::Color {
     }
 }
 
+// ── Analog GR meter ──────────────────────────────────────────
+
+pub fn analog_meter_arc(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(204, 126, 177, 40),   // purple tint arc
+        ThemeMode::Glass => vg::Color::rgba(137, 195, 235, 50),  // #89c3eb arc
+    }
+}
+pub fn analog_meter_tick(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(255, 255, 255, 80),
+        ThemeMode::Glass => vg::Color::rgba(40, 60, 90, 70),
+    }
+}
+pub fn analog_meter_tick_label(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(255, 255, 255, 55),
+        ThemeMode::Glass => vg::Color::rgba(40, 60, 90, 50),
+    }
+}
+pub fn analog_meter_pivot(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(204, 126, 177, 140),
+        ThemeMode::Glass => vg::Color::rgba(137, 195, 235, 120),
+    }
+}
+
 // ── Crossover display ────────────────────────────────────────
 
 pub fn xover_bg(mode: ThemeMode) -> vg::Color {

@@ -1,4 +1,6 @@
-/// Vertical segmented Gain Reduction meter widget.
+/// Gain Reduction meter widgets:
+/// - GrMeterWidget: Vertical segmented digital-style bar meter
+/// - AnalogGrMeter: Analog needle-style semicircular gauge
 /// Reads from Arc<GrMeterOutputs> via lenses for lock-free display.
 use std::cell::Cell;
 use std::sync::Arc;
@@ -231,5 +233,156 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
         }
 
         // GR label + value readout are rendered as VIZIA child Labels (see build())
+    }
+}
+
+// ── Analog Needle GR Meter ──────────────────────────────────
+
+const ANALOG_WIDTH: f32 = 100.0;
+const ANALOG_HEIGHT: f32 = 60.0;
+
+/// Analog needle-style semicircular GR gauge.
+/// Needle sweeps from right (0dB) to left (-6dB) across a 180° arc.
+pub struct AnalogGrMeter<L: Lens<Target = f32>> {
+    level_lens: L,
+    glass_mode: Arc<AtomicBool>,
+    font_id: Cell<Option<vg::FontId>>,
+}
+
+impl<L: Lens<Target = f32>> AnalogGrMeter<L> {
+    pub fn new(cx: &mut Context, level_lens: L, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self>
+    where
+        L: Clone + 'static,
+    {
+        Self {
+            level_lens,
+            glass_mode,
+            font_id: Cell::new(None),
+        }
+        .build(cx, |_| {})
+        .width(Pixels(ANALOG_WIDTH))
+        .height(Pixels(ANALOG_HEIGHT))
+    }
+
+    #[inline]
+    fn ensure_font(&self, canvas: &mut Canvas) -> vg::FontId {
+        if let Some(fid) = self.font_id.get() {
+            fid
+        } else {
+            let fid = canvas.add_font_mem(nih_plug_vizia::assets::fonts::NOTO_SANS_REGULAR)
+                .expect("failed to load font");
+            self.font_id.set(Some(fid));
+            fid
+        }
+    }
+}
+
+impl<L: Lens<Target = f32>> View for AnalogGrMeter<L> {
+    fn element(&self) -> Option<&'static str> {
+        Some("analog-gr-meter")
+    }
+
+    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+        let bounds = cx.bounds();
+        if bounds.w == 0.0 || bounds.h == 0.0 {
+            return;
+        }
+
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
+        let dpi = cx.scale_factor();
+        let font = self.ensure_font(canvas);
+
+        let gr_db = self.level_lens.get(cx);
+
+        // Gauge geometry: semicircle, pivot at bottom center
+        let cx_pos = bounds.x + bounds.w * 0.5;          // pivot X
+        let cy_pos = bounds.y + bounds.h - 4.0 * dpi;    // pivot Y (near bottom)
+        let radius = (bounds.w * 0.5 - 4.0 * dpi).min(bounds.h - 8.0 * dpi);
+
+        // Angle mapping: π (left, -6dB) → 0 (right, 0dB)
+        // 0dB = right end (angle 0), -6dB = left end (angle π)
+        let db_to_angle = |db: f32| -> f32 {
+            let clamped = db.clamp(MIN_DB, MAX_DB);
+            let t = (clamped - MAX_DB) / (MIN_DB - MAX_DB); // 0 at 0dB, 1 at -6dB
+            std::f32::consts::PI * t
+        };
+
+        // ── Background arc ──
+        {
+            let mut path = vg::Path::new();
+            path.arc(cx_pos, cy_pos, radius, std::f32::consts::PI, 0.0, vg::Solidity::Hole);
+            let mut paint = vg::Paint::color(theme::analog_meter_arc(mode));
+            paint.set_line_width(2.5 * dpi);
+            canvas.stroke_path(&path, &paint);
+        }
+
+        // ── Tick marks ──
+        let tick_dbs: [(f32, &str); 4] = [(0.0, "0"), (-2.0, "2"), (-4.0, "4"), (-6.0, "6")];
+        for &(db, label) in &tick_dbs {
+            let angle = db_to_angle(db);
+            let cos_a = angle.cos();
+            let sin_a = angle.sin();
+
+            // Outer tick
+            let inner_r = radius - 4.0 * dpi;
+            let outer_r = radius + 2.0 * dpi;
+            let x0 = cx_pos - cos_a * inner_r;
+            let y0 = cy_pos - sin_a * inner_r;
+            let x1 = cx_pos - cos_a * outer_r;
+            let y1 = cy_pos - sin_a * outer_r;
+
+            let mut path = vg::Path::new();
+            path.move_to(x0, y0);
+            path.line_to(x1, y1);
+            let mut paint = vg::Paint::color(theme::analog_meter_tick(mode));
+            paint.set_line_width(1.0 * dpi);
+            canvas.stroke_path(&path, &paint);
+
+            // Label text
+            let label_r = radius + 8.0 * dpi;
+            let lx = cx_pos - cos_a * label_r;
+            let ly = cy_pos - sin_a * label_r;
+
+            let mut text_paint = vg::Paint::color(theme::analog_meter_tick_label(mode));
+            text_paint.set_font_size(9.5 * dpi);
+            text_paint.set_font(&[font]);
+            text_paint.set_text_align(vg::Align::Center);
+            text_paint.set_text_baseline(vg::Baseline::Middle);
+            let _ = canvas.fill_text(lx, ly, label, &text_paint);
+        }
+
+        // ── Needle ──
+        {
+            let angle = db_to_angle(gr_db);
+            let cos_a = angle.cos();
+            let sin_a = angle.sin();
+
+            let needle_len = radius - 2.0 * dpi;
+            let nx = cx_pos - cos_a * needle_len;
+            let ny = cy_pos - sin_a * needle_len;
+
+            // Color: blue normally, blending toward red for heavy compression
+            let intensity = (gr_db.clamp(MIN_DB, MAX_DB) - MAX_DB).abs() / (MAX_DB - MIN_DB).abs();
+            let needle_color = if intensity > 0.75 {
+                theme::meter_fill_red(mode)
+            } else {
+                theme::meter_fill_blue(mode)
+            };
+
+            let mut path = vg::Path::new();
+            path.move_to(cx_pos, cy_pos);
+            path.line_to(nx, ny);
+            let mut paint = vg::Paint::color(needle_color);
+            paint.set_line_width(1.5 * dpi);
+            paint.set_line_cap(vg::LineCap::Round);
+            canvas.stroke_path(&path, &paint);
+        }
+
+        // ── Pivot circle ──
+        {
+            let mut path = vg::Path::new();
+            path.circle(cx_pos, cy_pos, 2.5 * dpi);
+            canvas.fill_path(&path, &vg::Paint::color(theme::analog_meter_pivot(mode)));
+        }
     }
 }
