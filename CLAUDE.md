@@ -186,7 +186,7 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Linux は対象外
 - タグ `v*` プッシュで GitHub Release (draft) 自動作成
 
-## Current State (v0.4.4)
+## Current State (v0.5.1)
 
 ### Implemented
 - 4-band LR4 crossover with adjustable frequencies
@@ -200,8 +200,13 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Full VIZIA GUI with custom widgets:
   - GlassKnob (3 sizes), GR meters, crossover display
   - Segmented controls, toggle buttons
-  - Spectrum analyzer (in-crate FFT, currently unused in layout)
   - Header with global controls + theme toggle
+- **Delta spectrum analyzer** (v0.5.0)
+  - Pre/post processing difference display (cut=blue, boost=orange)
+  - 8192-point in-crate FFT, 1/3 octave smoothing, asymmetric attack/release
+  - Lock-free triple-buffer audio→GUI data flow
+  - Noise gate to suppress phantom display during silence
+  - Oversampler-aware pre/post capture (v0.5.1): both captured inside oversampled domain to prevent FIR rolloff artifacts
 - **Dark / Glass dual theme** with lens-based reactive colors
   - Dark: purple-tinted glassmorphism (`#cc7eb1` / `#663f58`), gradient background `#2B2652` → `#1E1A40`
   - Glass: sky blue tint (`#89c3eb`), near-white gradient background `#F2F6FB` → `#FAFBFD`
@@ -210,6 +215,9 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **GitHub Actions CI** (macOS Universal + Windows)
 - **Improved label visibility** for segmented controls (v0.4.4)
 - **Header controls vertically centered** (v0.4.4)
+- **DAW bypass support** (v0.5.1): VST3 kIsBypass flag for Cubase bypass button
+- **Oversampling fixes** (v0.5.1): rewritten halfband FIR, correct compressor sample rate at 2x/4x, phase-coherent dry/wet mix
+- **GR meter/spectrum range** (v0.5.1): ±6dB range for practical mastering use
 
 ### TODO
 
@@ -228,9 +236,10 @@ GitHub Actions (`.github/workflows/build.yml`):
    - Unit tests for each DSP module
    - Frequency response verification for crossover
 
-5. **Spectrum Analyzer Integration**
-   - Wire `SpectrumAnalyzer` widget into the editor layout
-   - Currently implemented but not displayed in the GUI
+5. **Linear Phase Crossover Mode**
+   - FIR-based linear phase crossover option for mastering use cases
+   - Zero phase rotation at crossover boundaries, better transient preservation
+   - Trade-off: increased latency (hundreds of samples) + pre-ringing
 
 ## Important Design Decisions
 

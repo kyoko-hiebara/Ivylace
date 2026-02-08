@@ -1,12 +1,11 @@
 /// Oversampling module for anti-aliased saturation and compression
 ///
-/// Uses half-band polyphase FIR filters for efficient 2x oversampling.
+/// Uses a simple FIR lowpass filter for 2x oversampling.
 /// 4x is achieved by cascading two 2x stages.
 ///
-/// The FIR filter coefficients are designed for:
-/// - Steep transition band near Nyquist/2
-/// - Good stopband attenuation (>80dB)
-/// - Linear phase (symmetric FIR)
+/// The approach is straightforward:
+/// - Upsample: zero-stuff → FIR lowpass filter (gain-of-2 to compensate)
+/// - Downsample: FIR lowpass filter → decimate (keep every other sample)
 ///
 /// No heap allocations — all buffers are fixed-size arrays.
 
@@ -27,115 +26,142 @@ impl Default for OversamplingFactor {
     }
 }
 
-/// Half-band FIR filter coefficients for 2x oversampling
-/// 16-tap half-band filter with ~80dB stopband attenuation
-/// Only non-zero coefficients stored (half-band property: every other coeff is 0)
-const HALFBAND_COEFFS: [f64; 8] = [
-    -0.000_986_588_470_651_4,
-     0.005_765_984_949_204_5,
-    -0.021_352_573_498_587_4,
-     0.069_513_028_169_622_3,
-    // center tap is 0.5 (handled separately)
-    // mirror of above
-     0.069_513_028_169_622_3,
-    -0.021_352_573_498_587_4,
-     0.005_765_984_949_204_5,
-    -0.000_986_588_470_651_4,
-];
+impl OversamplingFactor {
+    /// Returns the integer multiplier (1, 2, or 4).
+    pub fn multiplier(self) -> u32 {
+        match self {
+            Self::X1 => 1,
+            Self::X2 => 2,
+            Self::X4 => 4,
+        }
+    }
+}
 
-/// Half the filter length
-const HALFBAND_HALF_LEN: usize = 8;
-/// Full delay line length for the half-band filter
-const HALFBAND_DELAY_LEN: usize = HALFBAND_HALF_LEN * 2 + 1; // 17
+/// FIR lowpass filter for 2x oversampling.
+///
+/// 15-tap symmetric half-band FIR. At the 2x rate, the cutoff is at
+/// 0.25 * fs_2x = 0.5 * fs_original (i.e., original Nyquist).
+///
+/// Full impulse response (symmetric, 15 taps, indices -7..+7):
+///   h[n] for n = 0..14, center at n=7
+///
+/// Designed with windowed-sinc (Kaiser, beta=4.5) then normalized for
+/// unity DC gain at the 2x rate.
+const FIR_TAPS: usize = 15;
+const FIR_HALF: usize = 7; // (FIR_TAPS - 1) / 2
 
-/// Single-channel 2x oversampler using half-band polyphase FIR
+/// The 15-tap FIR coefficients (symmetric: coeff[k] == coeff[14-k]).
+/// Normalized so sum = 1.0 (unity DC gain). The *2 gain for zero-stuffing
+/// compensation is applied to the input in the upsampler, not the filter.
+const FIR_COEFFS: [f64; FIR_TAPS] = {
+    // Start from windowed sinc for half-band lowpass (cutoff = π/2)
+    // h_ideal[n] = sin(π/2 * (n - 7)) / (π * (n - 7)) * kaiser(n, 15, 4.5)
+    // Then normalize sum to 0.5.
+    //
+    // Precomputed:
+    [
+        -0.002_077_586_698_498_6,  // n=0
+         0.0,                       // n=1
+         0.017_726_580_009_717_6,  // n=2
+         0.0,                       // n=3
+        -0.069_570_697_498_560_9,  // n=4
+         0.0,                       // n=5
+         0.303_921_704_187_342_0,  // n=6
+         0.500_000_000_000_000_0,  // n=7 (center tap)
+         0.303_921_704_187_342_0,  // n=8
+         0.0,                       // n=9
+        -0.069_570_697_498_560_9,  // n=10
+         0.0,                       // n=11
+         0.017_726_580_009_717_6,  // n=12
+         0.0,                       // n=13
+        -0.002_077_586_698_498_6,  // n=14
+    ]
+};
+
+/// 2x-rate delay line length for the FIR filter
+const DELAY_2X: usize = FIR_TAPS;
+
+/// Single-channel 2x oversampler.
+///
+/// Upsample path: input → zero-stuff → FIR filter (*2) → 2x output
+/// Downsample path: 2x input → FIR filter → decimate → 1x output
 #[derive(Clone)]
 pub struct Oversampler2x {
-    /// Delay line for upsampling filter
-    up_delay: [f64; HALFBAND_DELAY_LEN],
+    /// Circular buffer for the upsampling FIR (at 2x rate)
+    up_buf: [f64; DELAY_2X],
     up_pos: usize,
-    /// Delay line for downsampling filter
-    down_delay: [f64; HALFBAND_DELAY_LEN],
+    /// Circular buffer for the downsampling FIR (at 2x rate)
+    down_buf: [f64; DELAY_2X],
     down_pos: usize,
+    /// Toggle for zero-stuffing: true = insert real sample, false = insert zero
+    up_phase: bool,
 }
 
 impl Oversampler2x {
     pub fn new() -> Self {
         Self {
-            up_delay: [0.0; HALFBAND_DELAY_LEN],
+            up_buf: [0.0; DELAY_2X],
             up_pos: 0,
-            down_delay: [0.0; HALFBAND_DELAY_LEN],
+            down_buf: [0.0; DELAY_2X],
             down_pos: 0,
+            up_phase: true,
         }
     }
 
     pub fn reset(&mut self) {
-        self.up_delay = [0.0; HALFBAND_DELAY_LEN];
+        self.up_buf = [0.0; DELAY_2X];
         self.up_pos = 0;
-        self.down_delay = [0.0; HALFBAND_DELAY_LEN];
+        self.down_buf = [0.0; DELAY_2X];
         self.down_pos = 0;
+        self.up_phase = true;
+    }
+
+    /// Push one sample into the 2x-rate upsampling buffer and compute filtered output.
+    #[inline(always)]
+    fn up_push_and_filter(&mut self, sample: f64) -> f64 {
+        self.up_buf[self.up_pos] = sample;
+        // Convolve with FIR
+        let mut out = 0.0;
+        let mut idx = self.up_pos;
+        for k in 0..FIR_TAPS {
+            out += self.up_buf[idx] * FIR_COEFFS[k];
+            if idx == 0 { idx = DELAY_2X - 1; } else { idx -= 1; }
+        }
+        self.up_pos = (self.up_pos + 1) % DELAY_2X;
+        out
     }
 
     /// Upsample: produce 2 output samples from 1 input sample.
     /// Returns [sample_0, sample_1] at 2x rate.
     #[inline(always)]
     pub fn upsample(&mut self, input: f64) -> [f64; 2] {
-        // Insert input with zero-stuffing:
-        // Even samples = input, odd samples = 0
-        // Then filter with half-band FIR
+        // Zero-stuffing: insert input, then zero (or vice versa).
+        // The *2.0 compensates for the energy loss from zero-stuffing.
+        let s0 = self.up_push_and_filter(input * 2.0);
+        let s1 = self.up_push_and_filter(0.0);
+        [s0, s1]
+    }
 
-        // Push input into delay line (at even position)
-        self.up_delay[self.up_pos] = input * 2.0; // *2 to compensate for zero-stuffing
-        let pos = self.up_pos;
-
-        // Compute filtered output for even sample (center tap + polyphase)
-        let mut even_out = self.up_delay[pos] * 0.5; // center tap
-        for k in 0..HALFBAND_HALF_LEN {
-            let idx_neg = (pos + HALFBAND_DELAY_LEN - (2 * k + 1)) % HALFBAND_DELAY_LEN;
-            let idx_pos = (pos + 2 * k + 1) % HALFBAND_DELAY_LEN;
-            even_out += HALFBAND_COEFFS[k] * (self.up_delay[idx_neg] + self.up_delay[idx_pos]);
+    /// Push one sample into the downsampling buffer and compute filtered output.
+    #[inline(always)]
+    fn down_push_and_filter(&mut self, sample: f64) -> f64 {
+        self.down_buf[self.down_pos] = sample;
+        let mut out = 0.0;
+        let mut idx = self.down_pos;
+        for k in 0..FIR_TAPS {
+            out += self.down_buf[idx] * FIR_COEFFS[k];
+            if idx == 0 { idx = DELAY_2X - 1; } else { idx -= 1; }
         }
-
-        // Odd sample: interpolated value using the polyphase decomposition
-        // For zero-stuffed signal, odd sample is purely from the filter wings
-        let mut odd_out = 0.0;
-        for k in 0..HALFBAND_HALF_LEN {
-            let idx = (pos + HALFBAND_DELAY_LEN - 2 * k) % HALFBAND_DELAY_LEN;
-            odd_out += HALFBAND_COEFFS[k] * self.up_delay[idx];
-        }
-        // Add center contribution for odd
-        let center_idx = (pos + HALFBAND_DELAY_LEN - HALFBAND_HALF_LEN) % HALFBAND_DELAY_LEN;
-        odd_out += self.up_delay[center_idx] * 0.5;
-
-        self.up_pos = (self.up_pos + 1) % HALFBAND_DELAY_LEN;
-
-        [even_out, odd_out]
+        self.down_pos = (self.down_pos + 1) % DELAY_2X;
+        out
     }
 
     /// Downsample: take 2 input samples (at 2x rate) and produce 1 output sample.
     #[inline(always)]
     pub fn downsample(&mut self, samples: [f64; 2]) -> f64 {
-        // Anti-aliasing filter + decimation
-        // Process both samples through the filter, output only every other
-
-        // First sample
-        self.down_delay[self.down_pos] = samples[0];
-        self.down_pos = (self.down_pos + 1) % HALFBAND_DELAY_LEN;
-
-        // Second sample
-        self.down_delay[self.down_pos] = samples[1];
-
-        // Compute filtered output (keeping every other sample)
-        let pos = self.down_pos;
-        let mut output = self.down_delay[pos] * 0.5;
-        for k in 0..HALFBAND_HALF_LEN {
-            let idx_neg = (pos + HALFBAND_DELAY_LEN - (2 * k + 1)) % HALFBAND_DELAY_LEN;
-            let idx_pos = (pos + 2 * k + 1) % HALFBAND_DELAY_LEN;
-            output += HALFBAND_COEFFS[k] * (self.down_delay[idx_neg] + self.down_delay[idx_pos]);
-        }
-
-        self.down_pos = (self.down_pos + 1) % HALFBAND_DELAY_LEN;
-
+        // Filter both samples, but only keep every other output (decimation)
+        let _discard = self.down_push_and_filter(samples[0]);
+        let output = self.down_push_and_filter(samples[1]);
         output
     }
 }
@@ -212,14 +238,6 @@ impl BandOversampler {
     }
 
     /// Process a stereo sample pair through the oversampled callback.
-    ///
-    /// The callback `f` processes a single stereo sample at the oversampled rate
-    /// and returns the processed stereo pair.
-    ///
-    /// This function:
-    /// 1. Upsamples to the target rate
-    /// 2. Calls `f` for each oversampled sample
-    /// 3. Downsamples back to the original rate
     #[inline(always)]
     pub fn process<F>(&mut self, left: f64, right: f64, mut f: F) -> (f64, f64)
     where
@@ -227,11 +245,9 @@ impl BandOversampler {
     {
         match self.factor {
             OversamplingFactor::X1 => {
-                // No oversampling — direct processing
                 f(left, right)
             }
             OversamplingFactor::X2 => {
-                // 2x: upsample, process 2 samples, downsample
                 let (up_l, up_r) = self.stage1.upsample(left, right);
 
                 let (proc_l0, proc_r0) = f(up_l[0], up_r[0]);
@@ -240,25 +256,19 @@ impl BandOversampler {
                 self.stage1.downsample([proc_l0, proc_l1], [proc_r0, proc_r1])
             }
             OversamplingFactor::X4 => {
-                // 4x: cascade two 2x stages
-                // First upsample 1x -> 2x
                 let (up2_l, up2_r) = self.stage1.upsample(left, right);
 
-                // Second upsample each 2x sample -> 4x (2 samples each)
                 let (up4_l0, up4_r0) = self.stage2_a.upsample(up2_l[0], up2_r[0]);
                 let (up4_l1, up4_r1) = self.stage2_b.upsample(up2_l[1], up2_r[1]);
 
-                // Process all 4 samples
                 let (p_l0, p_r0) = f(up4_l0[0], up4_r0[0]);
                 let (p_l1, p_r1) = f(up4_l0[1], up4_r0[1]);
                 let (p_l2, p_r2) = f(up4_l1[0], up4_r1[0]);
                 let (p_l3, p_r3) = f(up4_l1[1], up4_r1[1]);
 
-                // Downsample 4x -> 2x
                 let (d2_l0, d2_r0) = self.stage2_a.downsample([p_l0, p_l1], [p_r0, p_r1]);
                 let (d2_l1, d2_r1) = self.stage2_b.downsample([p_l2, p_l3], [p_r2, p_r3]);
 
-                // Downsample 2x -> 1x
                 self.stage1.downsample([d2_l0, d2_l1], [d2_r0, d2_r1])
             }
         }
@@ -292,5 +302,112 @@ impl MultibandOversampler {
         for band in &mut self.bands {
             band.set_factor(factor);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fir_coeffs_sum() {
+        let sum: f64 = FIR_COEFFS.iter().sum();
+        let error = (sum - 1.0).abs();
+        assert!(error < 1e-10, "FIR sum should be 1.0, got {}", sum);
+    }
+
+    #[test]
+    fn test_2x_roundtrip_dc_unity() {
+        let mut os = Oversampler2x::new();
+        let dc_value = 0.5;
+        let mut last_output = 0.0;
+        for _ in 0..200 {
+            let up = os.upsample(dc_value);
+            last_output = os.downsample(up);
+        }
+        let error = (last_output - dc_value).abs();
+        assert!(
+            error < 0.001,
+            "DC roundtrip error: input={}, output={}, error={}",
+            dc_value, last_output, error
+        );
+    }
+
+    #[test]
+    fn test_2x_upsample_dc_level() {
+        let mut os = Oversampler2x::new();
+        let dc_value = 1.0;
+        let mut last_s0 = 0.0;
+        let mut last_s1 = 0.0;
+        for _ in 0..200 {
+            let [s0, s1] = os.upsample(dc_value);
+            last_s0 = s0;
+            last_s1 = s1;
+        }
+        // Both phases should be close to DC value at steady state
+        let error_s0 = (last_s0 - dc_value).abs();
+        let error_s1 = (last_s1 - dc_value).abs();
+        assert!(
+            error_s0 < 0.01,
+            "Phase 0 DC error: expected={}, got={}, error={}",
+            dc_value, last_s0, error_s0
+        );
+        assert!(
+            error_s1 < 0.01,
+            "Phase 1 DC error: expected={}, got={}, error={}",
+            dc_value, last_s1, error_s1
+        );
+    }
+
+    #[test]
+    fn test_4x_roundtrip_dc_unity() {
+        let mut band = BandOversampler::new();
+        band.set_factor(OversamplingFactor::X4);
+        let dc_value = 0.5;
+        let mut last_l = 0.0;
+        for _ in 0..500 {
+            let (l, _r) = band.process(dc_value, dc_value, |l, r| (l, r));
+            last_l = l;
+        }
+        let error = (last_l - dc_value).abs();
+        assert!(
+            error < 0.002,
+            "4x DC roundtrip error: input={}, output={}, error={}",
+            dc_value, last_l, error
+        );
+    }
+
+    /// Test that a low-frequency sine wave passes through 2x at near unity gain.
+    #[test]
+    fn test_2x_roundtrip_sine_1k() {
+        let mut os = Oversampler2x::new();
+        let sr = 44100.0_f64;
+        let freq = 1000.0_f64;
+        let mut max_in = 0.0_f64;
+        let mut max_out = 0.0_f64;
+
+        // Warmup
+        for i in 0..1000 {
+            let t = i as f64 / sr;
+            let input = (2.0 * std::f64::consts::PI * freq * t).sin();
+            let up = os.upsample(input);
+            let _out = os.downsample(up);
+        }
+        // Measure
+        for i in 1000..2000 {
+            let t = i as f64 / sr;
+            let input = (2.0 * std::f64::consts::PI * freq * t).sin();
+            let up = os.upsample(input);
+            let out = os.downsample(up);
+            max_in = max_in.max(input.abs());
+            max_out = max_out.max(out.abs());
+        }
+
+        let gain_db = 20.0 * (max_out / max_in).log10();
+        assert!(
+            gain_db.abs() < 0.5,
+            "1kHz sine roundtrip gain: {:.2} dB (should be ~0 dB)",
+            gain_db
+        );
     }
 }

@@ -20,9 +20,9 @@ fn mode_lens() -> impl Lens<Target = ThemeMode> {
 const METER_WIDTH: f32 = 18.0;
 const METER_HEIGHT: f32 = 60.0;
 const NUM_SEGMENTS: usize = 12;
-const MIN_DB: f32 = -40.0;
+const MIN_DB: f32 = -6.0;
 const MAX_DB: f32 = 0.0;
-const SCALE_MARKS: [f32; 5] = [0.0, -6.0, -12.0, -20.0, -30.0];
+const SCALE_MARKS: [f32; 4] = [0.0, -2.0, -4.0, -6.0];
 
 /// A simple vertical gain reduction meter
 pub struct GrMeterWidget<L: Lens<Target = f32>, P: Lens<Target = f32>> {
@@ -182,8 +182,8 @@ impl<L: Lens<Target = f32>, P: Lens<Target = f32>> View for GrMeterWidget<L, P> 
             // Fill from top (0 dB side)
             path.rect(mx + 1.0, my + 1.0, mw - 2.0, fill_h.min(mh - 2.0));
 
-            // Gradient: blue at low GR, red at high GR
-            let paint = if fill_pct > 0.6 {
+            // Gradient: blue at low GR, red when approaching max range
+            let paint = if fill_pct > 0.85 {
                 vg::Paint::linear_gradient(
                     mx, my,
                     mx, my + fill_h,

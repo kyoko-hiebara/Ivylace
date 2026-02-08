@@ -16,7 +16,7 @@ const FREQ_MIN: f32 = 20.0;
 const FREQ_MAX: f32 = 20000.0;
 const DISPLAY_HEIGHT: f32 = 80.0;
 /// Delta dB range (symmetrical around 0)
-const DELTA_DB_MAX: f32 = 18.0;
+const DELTA_DB_MAX: f32 = 6.0;
 /// Smoothing factor for attack (0..1). Lower = faster response to new peaks.
 const SMOOTH_ATTACK: f32 = 0.6;
 /// Smoothing factor for release (0..1). Higher = slower decay.
@@ -159,8 +159,15 @@ impl View for SpectrumAnalyzer {
         }
 
         // ── Compute smoothed delta (asymmetric attack/release) ──
+        // Noise gate: ignore delta when both pre and post are below this threshold.
+        // This prevents phantom bumps at crossover boundaries during silence.
+        const NOISE_FLOOR_DB: f32 = -90.0;
         for i in 0..NUM_BINS {
-            let delta = work.post_mag[i] - work.pre_mag[i];
+            let delta = if work.pre_mag[i] < NOISE_FLOOR_DB && work.post_mag[i] < NOISE_FLOOR_DB {
+                0.0
+            } else {
+                work.post_mag[i] - work.pre_mag[i]
+            };
             let clamped = delta.clamp(-DELTA_DB_MAX, DELTA_DB_MAX);
             let prev = work.smoothed_delta[i];
             // Use faster attack when magnitude is increasing, slower release when decaying

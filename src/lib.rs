@@ -90,6 +90,10 @@ pub struct IvylaceParams {
     pub os_realtime: EnumParam<OversamplingParam>,
     #[id = "os_render"]
     pub os_render: EnumParam<OversamplingParam>,
+
+    // --- Bypass ---
+    #[id = "bypass"]
+    pub bypass: BoolParam,
 }
 
 #[derive(Params)]
@@ -370,6 +374,9 @@ impl Default for Ivylace {
 
                 os_realtime: EnumParam::new("OS Realtime", OversamplingParam::X1),
                 os_render: EnumParam::new("OS Render", OversamplingParam::X4),
+
+                bypass: BoolParam::new("Bypass", false)
+                    .make_bypass(),
             }),
             crossover: FourBandCrossover::new(44100.0),
             compressors: [
@@ -474,6 +481,11 @@ impl Plugin for Ivylace {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // Bypass: pass audio through unprocessed
+        if self.params.bypass.value() {
+            return ProcessStatus::Normal;
+        }
+
         // Select oversampling factor based on realtime vs render
         // is_rendering is set in initialize() from buffer_config.process_mode
         let os_factor = if self.is_rendering {
@@ -482,6 +494,14 @@ impl Plugin for Ivylace {
             self.params.os_realtime.value().to_factor()
         };
         self.oversampler.set_factor(os_factor);
+
+        // Update compressor sample rate to match effective oversampled rate.
+        // Without this, attack/release coefficients are wrong at 2x/4x
+        // (e.g., 10ms attack becomes 5ms at 2x, 2.5ms at 4x).
+        let effective_sr = self.current_sample_rate as f64 * os_factor.multiplier() as f64;
+        for comp in &mut self.compressors {
+            comp.set_sample_rate(effective_sr);
+        }
 
         // Read parameters
         let input_gain_db = self.params.input_gain.smoothed.next();
@@ -532,21 +552,24 @@ impl Plugin for Ivylace {
             let left_in = *channel_samples.get_mut(0).unwrap() as f64 * input_gain;
             let right_in = *channel_samples.get_mut(1).unwrap() as f64 * input_gain;
 
-            // Store dry signal
-            let dry_l = left_in;
-            let dry_r = right_in;
-
-            // Feed pre-processing spectrum buffer (mono sum, only when GUI is open)
-            if self.params.editor_state.is_open() {
-                self.spectrum_pre.push((left_in as f32 + right_in as f32) * 0.5);
-            }
-
             // Split into 4 bands
             let (bands_l, bands_r) = self.crossover.process(left_in, right_in);
+
+            // Dry signal = crossover-split sum (before comp/sat).
+            // Using the band sum ensures the dry path shares the same phase
+            // characteristics as the wet path, preventing phase cancellation
+            // artifacts at intermediate dry/wet mix values.
+            let dry_l: f64 = bands_l.iter().sum();
+            let dry_r: f64 = bands_r.iter().sum();
 
             // Process each band through oversampled compressor + saturation
             let mut out_l = 0.0f64;
             let mut out_r = 0.0f64;
+            // Accumulators for spectrum pre/post inside the oversampled domain.
+            // Both go through the same FIR up/down path, so the delta only
+            // shows comp+sat effects without oversampler rolloff artifacts.
+            let mut spectrum_pre_acc = 0.0f64;
+            let mut spectrum_post_acc = 0.0f64;
 
             // Destructure to avoid borrow checker issues with multiple mutable borrows
             let compressors = &mut self.compressors;
@@ -554,19 +577,39 @@ impl Plugin for Ivylace {
             let os_bands = &mut self.oversampler.bands;
             let gr_meters = &mut self.gr_meters;
 
+            let editor_open = self.params.editor_state.is_open();
+
             for i in 0..NUM_BANDS {
-                // Process through oversampler (wraps compressor + saturation)
                 let comp = &mut compressors[i];
                 let sat = &mut sat_bands[i];
+
+                // Per-band accumulators for oversampled-domain pre/post
+                let mut band_pre_sum = 0.0f64;
+                let mut band_post_sum = 0.0f64;
+                let mut band_os_count = 0u32;
 
                 let (proc_l, proc_r) = os_bands[i].process(
                     bands_l[i],
                     bands_r[i],
                     |l, r| {
+                        // Pre: input to comp/sat (inside oversampled domain)
+                        band_pre_sum += (l + r) * 0.5;
                         let (cl, cr) = comp.process(l, r);
-                        (sat.process(cl), sat.process(cr))
+                        let sl = sat.process(cl);
+                        let sr = sat.process(cr);
+                        // Post: output of comp/sat (inside oversampled domain)
+                        band_post_sum += (sl + sr) * 0.5;
+                        band_os_count += 1;
+                        (sl, sr)
                     },
                 );
+
+                // Average the oversampled pre/post values back to 1x rate
+                if editor_open && band_os_count > 0 {
+                    let inv = 1.0 / band_os_count as f64;
+                    spectrum_pre_acc += band_pre_sum * inv;
+                    spectrum_post_acc += band_post_sum * inv;
+                }
 
                 // Feed GR meter (from compressor's current gain reduction)
                 gr_meters[i].push(comp.gain_reduction_db());
@@ -594,9 +637,13 @@ impl Plugin for Ivylace {
             *channel_samples.get_mut(0).unwrap() = out_sample_l;
             *channel_samples.get_mut(1).unwrap() = out_sample_r;
 
-            // Feed post-processing spectrum buffer (mono sum, only when GUI is open)
-            if self.params.editor_state.is_open() {
-                self.spectrum_post.push((out_sample_l + out_sample_r) * 0.5);
+            // Feed spectrum buffers (only when GUI is open).
+            // Both pre and post are accumulated inside the oversampled domain,
+            // so they share the same FIR filter path and the delta shows only
+            // comp+sat effects without oversampler high-frequency rolloff artifacts.
+            if editor_open {
+                self.spectrum_pre.push(spectrum_pre_acc as f32);
+                self.spectrum_post.push(spectrum_post_acc as f32);
             }
 
             // Update GR meter outputs at reduced rate
