@@ -56,12 +56,8 @@ impl Header {
                 HStack::new(cx, move |cx| {
                     // Sat Type segmented control
                     let gm_c1 = gm_center.clone();
-                    VStack::new(cx, move |cx| {
-                        SegmentedParam::new(cx, Data::params, |p| &p.sat_type, Some("SAT TYPE"), gm_c1.clone());
-                    })
-                    .width(Stretch(1.0))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0));
+                    SegmentedParam::new(cx, Data::params, |p| &p.sat_type, Some("SAT TYPE"), gm_c1.clone())
+                        .height(Auto);
 
                     // Divider
                     let div1_color = mode_lens().map(|m| theme::to_vizia(theme::divider(*m)));
@@ -74,12 +70,8 @@ impl Header {
 
                     // OS Realtime segmented control
                     let gm_c2 = gm_center.clone();
-                    VStack::new(cx, move |cx| {
-                        SegmentedParam::new(cx, Data::params, |p| &p.os_realtime, Some("OS REALTIME"), gm_c2.clone());
-                    })
-                    .width(Stretch(1.0))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0));
+                    SegmentedParam::new(cx, Data::params, |p| &p.os_realtime, Some("OS REALTIME"), gm_c2.clone())
+                        .height(Auto);
 
                     // Divider
                     let div2_color = mode_lens().map(|m| theme::to_vizia(theme::divider(*m)));
@@ -92,12 +84,8 @@ impl Header {
 
                     // OS Render segmented control
                     let gm_c3 = gm_center.clone();
-                    VStack::new(cx, move |cx| {
-                        SegmentedParam::new(cx, Data::params, |p| &p.os_render, Some("OS RENDER"), gm_c3.clone());
-                    })
-                    .width(Stretch(1.0))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0));
+                    SegmentedParam::new(cx, Data::params, |p| &p.os_render, Some("OS RENDER"), gm_c3.clone())
+                        .height(Auto);
                 })
                 .col_between(Pixels(8.0))
                 .left(Pixels(8.0))
@@ -202,7 +190,7 @@ impl View for ThemeToggle {
             let moon_r = 6.0 * dpi;
             let mut moon = vg::Path::new();
             moon.circle(cx_x - 1.0 * dpi, cy, moon_r);
-            canvas.fill_path(&moon, &vg::Paint::color(vg::Color::rgba(30, 40, 60, 200)));
+            canvas.fill_path(&moon, &vg::Paint::color(theme::theme_toggle_moon(mode)));
         } else {
             // Dark mode: show sun icon (bright circle with rays)
             canvas.fill_path(&path, &vg::Paint::color(theme::toggle_off_bg(mode)));
@@ -214,12 +202,12 @@ impl View for ThemeToggle {
             let sun_r = 4.0 * dpi;
             let mut sun = vg::Path::new();
             sun.circle(cx_x, cy, sun_r);
-            canvas.fill_path(&sun, &vg::Paint::color(vg::Color::rgba(255, 220, 100, 220)));
+            canvas.fill_path(&sun, &vg::Paint::color(theme::theme_toggle_sun(mode)));
 
             // Sun rays
             let ray_len = 2.5 * dpi;
             let ray_start = sun_r + 1.5 * dpi;
-            let mut ray_paint = vg::Paint::color(vg::Color::rgba(255, 220, 100, 160));
+            let mut ray_paint = vg::Paint::color(theme::theme_toggle_sun_ray(mode));
             ray_paint.set_line_width(1.5 * dpi);
             for i in 0..8 {
                 let angle = (i as f32) * std::f32::consts::PI / 4.0;

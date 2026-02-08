@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
+use nih_plug_vizia::vizia::vg;
 use nih_plug_vizia::widgets::ResizeHandle;
 use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
 
@@ -57,18 +58,15 @@ pub(crate) fn create(
         .build(cx);
 
         // ── Full GUI: Header + Crossover + 4 Band Strips ──
-        let bg_color_lens = Data::params.map(|p| {
-            let mode = if p.glass_mode.load(Ordering::Relaxed) {
-                theme::ThemeMode::Glass
-            } else {
-                theme::ThemeMode::Dark
-            };
-            theme::to_vizia(theme::page_bg(mode))
-        });
-
         let about_visible = Arc::new(AtomicBool::new(false));
 
+        let p_for_glass = Data::params.get(cx);
+        let glass_mode_for_bg = p_for_glass.glass_mode.clone();
+
         VStack::new(cx, |cx| {
+            // Gradient background (SelfDirected, drawn behind everything)
+            BackgroundGradient::new(cx, glass_mode_for_bg.clone());
+
             let p = Data::params.get(cx);
             let glass_mode = p.glass_mode.clone();
 
@@ -88,7 +86,6 @@ pub(crate) fn create(
             // About dialog overlay (rendered last → on top of everything)
             about::AboutDialog::new(cx, about_visible.clone(), glass_mode.clone());
         })
-        .background_color(bg_color_lens)
         .width(Stretch(1.0))
         .height(Stretch(1.0));
 
@@ -161,5 +158,59 @@ impl View for TitleBarLabel {
                 meta.consume();
             }
         });
+    }
+}
+
+// ── Background Gradient View ────────────────────────────────
+
+struct BackgroundGradient {
+    glass_mode: Arc<AtomicBool>,
+}
+
+impl BackgroundGradient {
+    fn new(cx: &mut Context, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self> {
+        Self { glass_mode }
+            .build(cx, |_| {})
+            .position_type(PositionType::SelfDirected)
+            .left(Pixels(0.0))
+            .top(Pixels(0.0))
+            .width(Stretch(1.0))
+            .height(Stretch(1.0))
+            .hoverable(false)
+    }
+}
+
+impl View for BackgroundGradient {
+    fn element(&self) -> Option<&'static str> {
+        Some("background-gradient")
+    }
+
+    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+        let bounds = cx.bounds();
+        if bounds.w == 0.0 || bounds.h == 0.0 {
+            return;
+        }
+
+        let mode = if self.glass_mode.load(Ordering::Relaxed) {
+            theme::ThemeMode::Glass
+        } else {
+            theme::ThemeMode::Dark
+        };
+
+        let top_color = theme::page_bg_top(mode);
+        let bottom_color = theme::page_bg_bottom(mode);
+
+        let paint = vg::Paint::linear_gradient(
+            bounds.x,
+            bounds.y,
+            bounds.x,
+            bounds.y + bounds.h,
+            top_color,
+            bottom_color,
+        );
+
+        let mut path = vg::Path::new();
+        path.rect(bounds.x, bounds.y, bounds.w, bounds.h);
+        canvas.fill_path(&path, &paint);
     }
 }

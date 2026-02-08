@@ -46,9 +46,25 @@ impl ToggleButton {
         let param_base = ParamWidgetBase::new(cx, params.clone(), params_to_param);
 
         let active_lens = ParamWidgetBase::make_lens(
-            params,
+            params.clone(),
             params_to_param,
             |param| param.unmodulated_normalized_value() > 0.5,
+        );
+
+        // Separate lens for label text color (active state + theme mode → color)
+        let gm = glass_mode.clone();
+        let text_color_lens = ParamWidgetBase::make_lens(
+            params,
+            params_to_param,
+            move |param| {
+                let active = param.unmodulated_normalized_value() > 0.5;
+                let mode = if gm.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
+                if active {
+                    theme::to_vizia(theme::text_on_active(mode))
+                } else {
+                    theme::to_vizia(theme::toggle_off_text(mode))
+                }
+            },
         );
 
         Self {
@@ -66,6 +82,7 @@ impl ToggleButton {
                 .height(Stretch(1.0))
                 .child_top(Stretch(1.0))
                 .child_bottom(Stretch(1.0))
+                .color(text_color_lens)
                 .hoverable(false);
         })
         .height(Pixels(24.0))

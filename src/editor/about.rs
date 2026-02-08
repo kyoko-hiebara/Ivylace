@@ -11,8 +11,9 @@ use nih_plug_vizia::vizia::vg;
 use super::theme::{self, ThemeMode};
 use super::Data;
 
-/// PNG logo embedded at compile time.
+/// PNG logos embedded at compile time.
 const LOGO_PNG: &[u8] = include_bytes!("../../ivylace_logo.png");
+const LOGO_DARK_PNG: &[u8] = include_bytes!("../../ivylace_logo_dark.png");
 
 /// Noto Sans JP (kana subset) for Japanese text fallback.
 const NOTO_SANS_JP_KANA: &[u8] = include_bytes!("../../assets/noto_sans_jp_kana.ttf");
@@ -21,13 +22,19 @@ const NOTO_SANS_JP_KANA: &[u8] = include_bytes!("../../assets/noto_sans_jp_kana.
 pub(crate) struct AboutDialog {
     visible: Arc<AtomicBool>,
     glass_mode: Arc<AtomicBool>,
-    /// Cached femtovg image id (created on first draw).
-    logo_id: Cell<Option<vg::ImageId>>,
+    /// Cached femtovg image ids (created on first draw): [glass, dark].
+    logo_glass_id: Cell<Option<vg::ImageId>>,
+    logo_dark_id: Cell<Option<vg::ImageId>>,
     /// Cached femtovg font ids (created on first draw): [latin, jp_kana].
     font_ids: Cell<Option<(vg::FontId, vg::FontId)>>,
-    logo_width: u32,
-    logo_height: u32,
-    logo_rgba: Vec<u8>,
+    // Glass (light) logo
+    logo_glass_width: u32,
+    logo_glass_height: u32,
+    logo_glass_rgba: Vec<u8>,
+    // Dark logo
+    logo_dark_width: u32,
+    logo_dark_height: u32,
+    logo_dark_rgba: Vec<u8>,
 }
 
 impl AboutDialog {
@@ -36,22 +43,31 @@ impl AboutDialog {
         visible: Arc<AtomicBool>,
         glass_mode: Arc<AtomicBool>,
     ) -> Handle<'_, Self> {
-        // Decode PNG at widget creation (not on every draw).
-        let img = image::load_from_memory(LOGO_PNG).expect("Failed to decode logo PNG");
-        let rgba = img.to_rgba8();
-        let (w, h) = rgba.dimensions();
-        let logo_rgba = rgba.into_raw();
+        // Decode PNGs at widget creation (not on every draw).
+        let img_glass = image::load_from_memory(LOGO_PNG).expect("Failed to decode glass logo PNG");
+        let rgba_glass = img_glass.to_rgba8();
+        let (gw, gh) = rgba_glass.dimensions();
+        let logo_glass_rgba = rgba_glass.into_raw();
+
+        let img_dark = image::load_from_memory(LOGO_DARK_PNG).expect("Failed to decode dark logo PNG");
+        let rgba_dark = img_dark.to_rgba8();
+        let (dw, dh) = rgba_dark.dimensions();
+        let logo_dark_rgba = rgba_dark.into_raw();
 
         let vis_for_hover = visible.clone();
 
         Self {
             visible,
             glass_mode,
-            logo_id: Cell::new(None),
+            logo_glass_id: Cell::new(None),
+            logo_dark_id: Cell::new(None),
             font_ids: Cell::new(None),
-            logo_width: w,
-            logo_height: h,
-            logo_rgba,
+            logo_glass_width: gw,
+            logo_glass_height: gh,
+            logo_glass_rgba,
+            logo_dark_width: dw,
+            logo_dark_height: dh,
+            logo_dark_rgba,
         }
         .build(cx, |_| {})
         .position_type(PositionType::SelfDirected)
@@ -65,31 +81,33 @@ impl AboutDialog {
     }
 
     /// Ensure the logo texture is uploaded to the GPU (lazy init).
-    fn ensure_logo(&self, canvas: &mut Canvas) -> Option<vg::ImageId> {
-        if let Some(id) = self.logo_id.get() {
-            return Some(id);
+    /// Returns (image_id, width, height) for the current theme.
+    fn ensure_logo(&self, canvas: &mut Canvas, mode: ThemeMode) -> Option<(vg::ImageId, u32, u32)> {
+        let (id_cell, rgba, w, h) = match mode {
+            ThemeMode::Glass => (&self.logo_glass_id, &self.logo_glass_rgba, self.logo_glass_width, self.logo_glass_height),
+            ThemeMode::Dark => (&self.logo_dark_id, &self.logo_dark_rgba, self.logo_dark_width, self.logo_dark_height),
+        };
+
+        if let Some(id) = id_cell.get() {
+            return Some((id, w, h));
         }
 
         // Reinterpret raw RGBA bytes as &[rgb::RGBA8]
-        let pixel_count = self.logo_width as usize * self.logo_height as usize;
+        let pixel_count = w as usize * h as usize;
         let pixels: &[vg::rgb::RGBA8] = unsafe {
             std::slice::from_raw_parts(
-                self.logo_rgba.as_ptr() as *const vg::rgb::RGBA8,
+                rgba.as_ptr() as *const vg::rgb::RGBA8,
                 pixel_count,
             )
         };
 
-        let img_ref = vg::imgref::Img::new(
-            pixels,
-            self.logo_width as usize,
-            self.logo_height as usize,
-        );
+        let img_ref = vg::imgref::Img::new(pixels, w as usize, h as usize);
 
         let id = canvas
             .create_image(img_ref, vg::ImageFlags::empty())
             .ok()?;
-        self.logo_id.set(Some(id));
-        Some(id)
+        id_cell.set(Some(id));
+        Some((id, w, h))
     }
 
     /// Ensure fonts are loaded for femtovg text rendering (lazy init).
@@ -152,11 +170,7 @@ impl View for AboutDialog {
             path.rounded_rect(px, py, panel_w, panel_h, corner_r);
 
             // Solid background for readability
-            let bg_solid = match mode {
-                ThemeMode::Dark => vg::Color::rgba(25, 25, 40, 240),
-                ThemeMode::Glass => vg::Color::rgba(245, 248, 255, 235),
-            };
-            canvas.fill_path(&path, &vg::Paint::color(bg_solid));
+            canvas.fill_path(&path, &vg::Paint::color(theme::about_panel_bg(mode)));
 
             // Border
             let mut border_paint = vg::Paint::color(theme::panel_border(mode));
@@ -164,27 +178,33 @@ impl View for AboutDialog {
             canvas.stroke_path(&path, &border_paint);
         }
 
-        // ── Logo image ──
+        // ── Logo image (theme-dependent) ──
         let logo_display_w = 260.0 * dpi;
-        let logo_aspect = self.logo_height as f32 / self.logo_width as f32;
-        let logo_display_h = logo_display_w * logo_aspect;
-        let logo_x = px + (panel_w - logo_display_w) * 0.5;
         let logo_y = py + 24.0 * dpi;
 
-        if let Some(logo_id) = self.ensure_logo(canvas) {
+        let logo_display_h = if let Some((logo_id, lw, lh)) = self.ensure_logo(canvas, mode) {
+            let logo_aspect = lh as f32 / lw as f32;
+            let h = logo_display_w * logo_aspect;
+            let logo_x = px + (panel_w - logo_display_w) * 0.5;
+
             let paint = vg::Paint::image(
                 logo_id,
                 logo_x,
                 logo_y,
                 logo_display_w,
-                logo_display_h,
+                h,
                 0.0,
                 1.0,
             );
             let mut path = vg::Path::new();
-            path.rounded_rect(logo_x, logo_y, logo_display_w, logo_display_h, 8.0 * dpi);
+            path.rounded_rect(logo_x, logo_y, logo_display_w, h, 8.0 * dpi);
             canvas.fill_path(&path, &paint);
-        }
+            h
+        } else {
+            // Fallback: use glass logo aspect ratio
+            let logo_aspect = self.logo_glass_height as f32 / self.logo_glass_width as f32;
+            logo_display_w * logo_aspect
+        };
 
         // ── Text content ──
         let text_x = px + panel_w * 0.5;

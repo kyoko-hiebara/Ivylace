@@ -158,7 +158,7 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Linux は対象外
 - タグ `v*` プッシュで GitHub Release (draft) 自動作成
 
-## Current State (v0.4.3)
+## Current State (v0.4.4)
 
 ### Implemented
 - 4-band LR4 crossover with adjustable frequencies
