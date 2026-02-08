@@ -36,8 +36,10 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 
 ### GUI
 - **Dark / Glass dual theme** — switchable via header toggle, persisted per session
+  - Dark: purple-tinted glassmorphism with gradient background
+  - Glass: sky blue (#89c3eb) tinted light theme with near-white background
 - **Custom GPU-rendered widgets** — glassmorphism knobs, GR meters, crossover display
-- **About dialog** — click title bar to view logo, version, and author info
+- **About dialog** — click title bar to view logo, version, and author info (theme-dependent logo)
 - **Resizable window** (960 x 740 default)
 
 ### Band Layout
@@ -79,24 +81,24 @@ Requires Rust stable 1.75+.
 src/
 ├── lib.rs                  # Plugin entry point, parameters, process()
 ├── editor/                 # VIZIA GUI (custom widgets, femtovg drawing)
-│   ├── mod.rs              # Editor entry, Data lens model, title bar
-│   ├── theme.rs            # ~40 color functions, Dark/Glass dual theme
-│   ├── knob.rs             # GlassKnob rotary control
+│   ├── mod.rs              # Editor entry, Data lens model, title bar, background gradient
+│   ├── theme.rs            # ~45 color functions, Dark/Glass dual theme
+│   ├── knob.rs             # GlassKnob rotary control (3 sizes)
 │   ├── meter.rs            # GR meter widget
-│   ├── crossover.rs        # Crossover frequency display
-│   ├── segmented.rs        # Stepped enum control
-│   ├── toggle.rs           # Toggle button (IN/Solo/SAT)
+│   ├── crossover.rs        # Crossover frequency display with draggable handles
+│   ├── segmented.rs        # Stepped enum control (Ratio/Attack/Release/Sat Type/OS)
+│   ├── toggle.rs           # Toggle button (LINK/Power/Solo/SAT)
 │   ├── band_strip.rs       # Per-band strip layout
-│   ├── header.rs           # Global controls bar + theme toggle
-│   ├── spectrum.rs         # Spectrum analyzer
-│   └── about.rs            # About dialog overlay
+│   ├── header.rs           # Global controls bar + theme toggle (sun/moon)
+│   ├── spectrum.rs         # Spectrum analyzer (implemented, not yet in layout)
+│   └── about.rs            # About dialog overlay (theme-dependent logo)
 ├── dsp/
 │   ├── mod.rs
 │   ├── crossover.rs        # LR4 4-band crossover
 │   ├── compressor.rs       # SSL 4000G-style VCA compressor
-│   ├── saturation.rs       # Per-band analog saturation
+│   ├── saturation.rs       # Per-band analog saturation (Console/Tube/Tape)
 │   ├── oversampling.rs     # 2x/4x oversampling
-│   ├── gr_meter.rs         # Gain reduction metering
+│   ├── gr_meter.rs         # Gain reduction metering (lock-free)
 │   └── spectrum.rs         # FFT + lock-free spectrum buffer
 └── assets/
     └── noto_sans_jp_kana.ttf  # Japanese font subset for About dialog

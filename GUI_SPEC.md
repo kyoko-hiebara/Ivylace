@@ -19,17 +19,17 @@
 
 ```
 src/editor/
-  mod.rs          -- Editor entry: create(), default_state(), Data lens model, TitleBarLabel
-  theme.rs        -- ~40 color functions, ThemeMode enum, Dark/Glass dual theme
+  mod.rs          -- Editor entry: create(), default_state(), Data lens model, TitleBarLabel, BackgroundGradient
+  theme.rs        -- ~45 color functions, ThemeMode enum, Dark/Glass dual theme
   knob.rs         -- GlassKnob: custom rotary knob (arc + glass body, 3 sizes)
   meter.rs        -- GrMeterWidget: vertical segmented GR meter (custom draw)
   crossover.rs    -- CrossoverDisplay: log-freq band visualization, draggable handles
   segmented.rs    -- SegmentedParam: stepped enum parameter control
-  toggle.rs       -- ToggleButton: bool param toggle (Normal/Solo/Sat variants)
+  toggle.rs       -- ToggleButton: bool param toggle (Normal/Solo/Sat/Power variants)
   band_strip.rs   -- BandStrip: per-band vertical strip composing all controls
   header.rs       -- Header: global controls bar (In/Out Gain, Mix, Sat Type, OS) + ThemeToggle
-  spectrum.rs     -- SpectrumAnalyzer: real-time FFT spectrum display
-  about.rs        -- AboutDialog: full-screen overlay with logo, version, author, GitHub link
+  spectrum.rs     -- SpectrumAnalyzer: real-time FFT spectrum display (implemented, not yet in layout)
+  about.rs        -- AboutDialog: full-screen overlay with theme-dependent logo, version, author, GitHub link
 
 assets/
   noto_sans_jp_kana.ttf  -- Noto Sans JP subset (hiragana/katakana) for femtovg fallback
@@ -56,7 +56,8 @@ Additional shared state passed directly to widgets (not via lens):
 ### 1.4 Layout Hierarchy
 
 ```
-VStack (root, background: lens-reactive page_bg)
+VStack (root)
+  BackgroundGradient (SelfDirected overlay, hoverable=false, femtovg gradient)
   HStack (title bar, 28px) — TitleBarLabel (click → About dialog)
   Header (70px) — In/Out Gain, Mix, Sat Type, OS Realtime/Render, ThemeToggle
   CrossoverDisplay (96px)
@@ -75,7 +76,7 @@ VStack (root, background: lens-reactive page_bg)
 - `ThemeMode { Dark, Glass }` enum
 - `glass_mode: Arc<AtomicBool>` with `#[persist = "glass-mode"]` on IvylaceParams
 - ThemeToggle button in header flips the AtomicBool + `cx.needs_redraw()`
-- All ~40 color functions in `theme.rs` take `mode: ThemeMode`
+- All ~45 color functions in `theme.rs` take `mode: ThemeMode`
 
 ### 2.2 Color Reactivity
 
@@ -100,43 +101,48 @@ fn mode_lens() -> impl Lens<Target = ThemeMode> {
 
 ### 2.3 Band Colors
 
-| Band    | Color   | Hex       |
-|---------|---------|-----------|
-| Low     | Red     | `#FF6B6B` |
-| LowMid  | Orange  | `#FFA94D` |
-| HighMid  | Green   | `#69DB7C` |
-| High    | Blue    | `#74C0FC` |
+| Band    | Dark Mode | Glass Mode |
+|---------|-----------|------------|
+| Low     | `#FF6B6B` (red) | `#E04545` (deeper red) |
+| LowMid  | `#FFA94D` (orange) | `#E08A30` (deeper orange) |
+| HighMid  | `#69DB7C` (green) | `#38A852` (deeper green) |
+| High    | `#74C0FC` (blue) | `#3A8FD4` (deeper blue) |
 
 ### 2.4 Dark Theme Colors
 
 | Element | Value |
 |---------|-------|
-| Page background | `rgba(10, 10, 26, 255)` |
-| Panel bg | `rgba(255, 255, 255, 18)` |
-| Panel border | `rgba(255, 255, 255, 30)` |
+| Page bg gradient top | `#2B2652` |
+| Page bg gradient bottom | `#1E1A40` |
+| Glass/panel tint base | `rgba(204, 126, 177, alpha)` (#cc7eb1) |
+| Panel bg | `rgba(204, 126, 177, 22)` |
+| Panel border | `rgba(204, 126, 177, 40)` |
 | Text primary | `rgba(255, 255, 255, 230)` |
-| Text secondary | `rgba(255, 255, 255, 128)` |
-| Text dim | `rgba(255, 255, 255, 77)` |
+| Text secondary | `rgba(255, 255, 255, 150)` |
+| Text dim | `rgba(255, 255, 255, 170)` |
 
 ### 2.5 Glass Theme Colors
 
 | Element | Value |
 |---------|-------|
-| Page background | `rgba(220, 225, 240, 255)` |
-| Panel bg | `rgba(255, 255, 255, 120)` |
-| Panel border | `rgba(255, 255, 255, 180)` |
-| Text primary | `rgba(20, 20, 40, 230)` |
-| Text secondary | `rgba(30, 30, 60, 150)` |
-| Text dim | `rgba(40, 40, 80, 100)` |
+| Page bg gradient top | `#F2F6FB` |
+| Page bg gradient bottom | `#FAFBFD` (near-white) |
+| Glass/panel tint base | `rgba(137, 195, 235, alpha)` (#89c3eb) |
+| Panel bg | `rgba(137, 195, 235, 30)` |
+| Panel border | `rgba(137, 195, 235, 50)` |
+| Text primary | `rgba(30, 40, 60, 230)` |
+| Text secondary | `rgba(50, 60, 85, 160)` |
+| Text dim | `rgba(40, 55, 80, 190)` |
 
 ### 2.6 Special Colors
 
-| Purpose | Hex |
-|---------|-----|
-| Accent gold | `#E8A838` |
-| Solo yellow | `#FFD43B` |
-| About link (Dark) | `rgba(120, 200, 255, 200)` |
-| About link (Glass) | `rgba(40, 120, 200, 200)` |
+| Purpose | Dark | Glass |
+|---------|------|-------|
+| Accent gold | `#E8A838` | `#E8A838` |
+| Solo yellow | `#FFD43B` | `#FFD43B` |
+| About link | `rgba(160, 200, 255, 200)` | `rgba(40, 120, 200, 200)` |
+| About overlay bg | `rgba(40, 35, 80, 200)` | `rgba(0, 0, 0, 100)` |
+| About panel bg | `rgba(60, 52, 120, 240)` | `rgba(230, 242, 252, 240)` |
 
 ---
 
@@ -205,21 +211,32 @@ Full-width, 96px height, log-frequency display.
 
 ### 3.4 SegmentedParam (`segmented.rs`)
 
-Stepped segmented control for EnumParam (Ratio, Attack, Release).
+Stepped segmented control for EnumParam (Ratio, Attack, Release, Sat Type, OS).
 
-- HStack of SegmentButton views
-- Active state: combined lens (param active state + theme mode) via `ParamWidgetBase::make_lens`
-- Click emits `RawParamEvent` (BeginSet, SetNormalized, EndSet)
+**Structure**: `SegmentedParam` builds Label (optional, 8pt, 11px height) + HStack of `SegmentButton` views (18px height)
+
+**Active state**: combined lens (param active state + theme mode) via `ParamWidgetBase::make_lens` with captured `Arc<AtomicBool>`
+
+**Interaction**:
+- Click: `begin_set` + `set_normalized_value` on MouseDown, `end_set` on MouseUp (gesture split for Cubase)
+- `gesture_active: bool` tracks whether `end_set` is pending
+
+**Styling**:
 - Glass-style background: lens-reactive `seg_bg` / `seg_border`
+- Active segment: filled `seg_active_bg` rounded rect
 - Label color: lens-reactive `text_dim`
+- Active text: `seg_active_text`, inactive: `seg_inactive_text`
+
+**Header usage**: placed directly in HStack with `.height(Auto)` (no VStack wrapper), parent centers via `child_top/child_bottom(Stretch(1.0))`
 
 ### 3.5 ToggleButton (`toggle.rs`)
 
-Boolean parameter toggle with 3 variants:
+Boolean parameter toggle with 4 variants:
 
 | Variant | Active Color | Use |
 |---------|-------------|-----|
-| Normal  | Band color  | IN (compressor enable) |
+| Normal  | Band color  | LINK |
+| Power   | Band color (icon only) | Band enable |
 | Solo    | Yellow (#FFD43B) | Solo |
 | Sat     | Gold (#E8A838) | Saturation enable |
 
@@ -227,10 +244,11 @@ Boolean parameter toggle with 3 variants:
 - Active: linear gradient fill + border + glow (box_gradient)
 - Inactive: dark glass + border (theme-reactive)
 - Text: dark on active, grey on inactive
+- Power variant: draws power icon (circle + line) instead of text
 
 ### 3.6 SpectrumAnalyzer (`spectrum.rs`)
 
-Real-time FFT spectrum display, 80px height.
+Real-time FFT spectrum display (implemented but not yet wired into editor layout).
 
 **DSP** (`dsp/spectrum.rs`):
 - Triple-buffer `SpectrumBuffer`: lock-free audio-to-GUI sample transfer
@@ -254,18 +272,21 @@ Full-screen overlay dialog with centered info panel.
 **Trigger**: Click on title bar label (TitleBarLabel in mod.rs)
 
 **Resources** (compile-time embedded):
-- Logo: `include_bytes!("../../ivylace_logo.png")` → decoded by `image` crate at widget creation
+- Logos: `ivylace_logo.png` (Glass mode) + `ivylace_logo_dark.png` (Dark mode) via `include_bytes!`
+- Both decoded by `image` crate at widget creation (not on every draw)
 - Font: Noto Sans Regular (Latin, from nih-plug assets) + `assets/noto_sans_jp_kana.ttf` (JP fallback)
 
 **GPU resources** (lazy init via `Cell<Option<...>>`):
-- `vg::ImageId` — logo texture uploaded on first draw
-- `(vg::FontId, vg::FontId)` — Latin + JP fonts registered on first draw
+- `logo_glass_id: Cell<Option<vg::ImageId>>` — Glass logo texture
+- `logo_dark_id: Cell<Option<vg::ImageId>>` — Dark logo texture
+- `font_ids: Cell<Option<(vg::FontId, vg::FontId)>>` — Latin + JP fonts
+- `ensure_logo(canvas, mode)` → selects correct logo based on ThemeMode
 
 **Drawing**:
-- Full-screen dimming overlay (Dark: `rgba(0,0,0,180)`, Glass: `rgba(0,0,0,100)`)
+- Full-screen dimming overlay (Dark: `rgba(40,35,80,200)`, Glass: `rgba(0,0,0,100)`)
 - Centered panel (340x380px, 16px corner radius)
 - Panel background: theme-reactive solid color
-- Logo image (260px width, aspect-preserved, rounded corners)
+- Logo image (260px width, aspect-preserved, rounded corners, theme-dependent)
 - Text stack: "Ivylace", version, "Multiband Glue Compressor", "by きょーこ", GitHub URL, "Built with nih-plug"
 - Font fallback: `paint.set_font(&[latin_id, jp_id])` for mixed Latin/Japanese text
 
@@ -284,6 +305,17 @@ Theme mode toggle button in the header.
 - Custom View with `glass_mode: Arc<AtomicBool>`
 - Drawing: Sun icon (Dark mode) / Moon icon (Glass mode) with theme-reactive colors
 - Click: flips `glass_mode` AtomicBool + `cx.needs_redraw()`
+- Size: 28x28px
+
+### 3.9 BackgroundGradient (`mod.rs`)
+
+Full-screen gradient background drawn behind all content.
+
+- Custom View with `glass_mode: Arc<AtomicBool>`
+- `PositionType::SelfDirected` + `hoverable(false)` — doesn't interfere with event handling
+- Draws top-to-bottom linear gradient using femtovg:
+  - Dark: `#2B2652` → `#1E1A40` (deep purple)
+  - Glass: `#F2F6FB` → `#FAFBFD` (near-white with subtle blue)
 
 ---
 
@@ -339,15 +371,15 @@ Each `BandStrip` (vertical, 1/4 width) contains:
 1. **Accent line** (2px, band color) — lens-reactive
 2. **Band name** (11pt bold, band color) — lens-reactive
 3. **GR Meter** (20x112px, centered)
-4. **Threshold knob** (Lg, band color)
+4. **Threshold knob** (Lg, band color) — supports linked mode
 5. **Ratio segmented** (3 steps: 2:1 / 4:1 / 10:1)
 6. **Attack segmented** (6 steps: 0.1-30 ms)
 7. **Release segmented** (5 steps: 100ms-Auto)
-8. **Makeup knob** (Md) + **SC HPF knob** (Sm) in HStack
+8. **Makeup knob** (Sm) + **SC HPF knob** (Sm) in HStack
 9. **Saturation section** (glass panel, lens-reactive bg/border):
-   - Drive knob (Sm, accent color)
-   - SAT toggle (Sat variant)
-10. **Footer**: IN toggle (Normal) + Solo toggle (Solo)
+   - SATURATION label (8pt)
+   - Drive knob (Sm, accent color) + SAT toggle (Sat variant)
+10. **Footer**: LINK toggle (Normal) + Power toggle (Power) + SOLO toggle (Solo)
 
 **Spacing**:
 - RATIO/ATTACK/RELEASE: `row_between(15.0)`
@@ -357,7 +389,33 @@ Each `BandStrip` (vertical, 1/4 width) contains:
 
 ---
 
-## 6. Build & Bundle
+## 6. Header Layout
+
+Header bar (70px height) with three groups:
+
+**Left group** (`width(Auto)`):
+- IN GAIN knob (Sm, accent)
+- MIX knob (Sm, accent)
+- `col_between(16.0)`
+
+**Center group** (`width(Stretch(1.0))`):
+- Glass panel background with border + corner radius
+- SAT TYPE segmented (`.height(Auto)`)
+- Divider (1px × 32px, centered)
+- OS REALTIME segmented (`.height(Auto)`)
+- Divider (1px × 32px, centered)
+- OS RENDER segmented (`.height(Auto)`)
+- `child_top/child_bottom(Stretch(1.0))` on parent HStack centers Auto-height children
+- `col_between(8.0)`, padding `left/right(8.0)`
+
+**Right group** (`width(Auto)`):
+- OUT GAIN knob (Sm, accent)
+- ThemeToggle (28x28px, sun/moon icon)
+- `col_between(12.0)`
+
+---
+
+## 7. Build & Bundle
 
 ```bash
 # Debug check

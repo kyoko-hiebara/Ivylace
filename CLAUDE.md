@@ -23,7 +23,8 @@ ivylace/
 ├── Cargo.toml
 ├── README.md
 ├── GUI_SPEC.md
-├── ivylace_logo.png        # Logo image (embedded in About dialog)
+├── ivylace_logo.png        # Glass/Light mode logo (embedded in About dialog)
+├── ivylace_logo_dark.png   # Dark mode logo (embedded in About dialog)
 ├── assets/
 │   └── noto_sans_jp_kana.ttf  # Noto Sans JP subset for Japanese text
 ├── .github/
@@ -32,17 +33,17 @@ ivylace/
 └── src/
     ├── lib.rs              # Plugin entry: Ivylace struct, IvylaceParams, process()
     ├── editor/
-    │   ├── mod.rs          # Editor entry: create(), default_state(), Data lens model, title bar
-    │   ├── theme.rs        # Color functions (~40 functions), Dark/Glass dual theme
+    │   ├── mod.rs          # Editor entry: create(), default_state(), Data lens model, title bar, BackgroundGradient
+    │   ├── theme.rs        # Color functions (~45 functions), Dark/Glass dual theme
     │   ├── knob.rs         # GlassKnob: custom rotary knob (3 sizes)
     │   ├── meter.rs        # GrMeterWidget: vertical GR meter
     │   ├── crossover.rs    # CrossoverDisplay: log-freq band display, draggable handles
     │   ├── segmented.rs    # SegmentedParam: stepped enum control
-    │   ├── toggle.rs       # ToggleButton: bool param toggle (Normal/Solo/Sat)
+    │   ├── toggle.rs       # ToggleButton: bool param toggle (Normal/Solo/Sat/Power)
     │   ├── band_strip.rs   # BandStrip: per-band control strip
     │   ├── header.rs       # Header: global controls bar + ThemeToggle
-    │   ├── spectrum.rs     # SpectrumAnalyzer: real-time FFT display
-    │   └── about.rs        # AboutDialog: overlay with logo, version, author, GitHub link
+    │   ├── spectrum.rs     # SpectrumAnalyzer: real-time FFT display (currently unused)
+    │   └── about.rs        # AboutDialog: overlay with theme-dependent logo, version, author, GitHub link
     └── dsp/
         ├── mod.rs          # Module declarations
         ├── crossover.rs    # 4-band LR4 (24dB/oct) Linkwitz-Riley crossover
@@ -93,17 +94,18 @@ Input → Input Gain
 
 - **ViziaTheming::Custom** — all rendering via custom `View::draw()` with femtovg
 - **Dual theme** — Dark / Glass mode, toggled via header button, persisted with `#[persist = "glass-mode"]`
+- **Background gradient** — `BackgroundGradient` custom View with SelfDirected positioning, draws top-to-bottom gradient using femtovg `linear_gradient`
 - **Lens-based reactive colors** — `Data::params.map(|p| ...)` pattern for theme-aware VIZIA layout colors
 - **femtovg custom draw** — all widgets use `View::draw()` with direct canvas API
 - **Gesture split pattern** — `begin_set` + `set_value` on MouseDown, `end_set` on MouseUp (required for Cubase compatibility)
 - **ParamWidgetBase** for all parameter bindings
 - **Lock-free data flow** — AtomicF32 for GR meters, triple-buffer for spectrum
-- **About dialog** — overlay triggered by title bar click, with embedded PNG logo and Japanese font fallback
+- **About dialog** — overlay triggered by title bar click, with theme-dependent PNG logos and Japanese font fallback
 
 ### Theme System Details
 
 - `ThemeMode { Dark, Glass }` enum in `theme.rs`
-- ~40 color functions all take `mode: ThemeMode` parameter
+- ~45 color functions all take `mode: ThemeMode` parameter
 - `glass_mode: Arc<AtomicBool>` on `IvylaceParams`, `#[persist]` for session persistence
 - All widget structs hold `glass_mode: Arc<AtomicBool>`, read in `View::draw()`
 - VIZIA layout properties (background, border, text color) use lens-based reactivity:
@@ -116,13 +118,39 @@ Input → Input Gain
   ```
 - `theme::to_vizia(femtovg_color)` converts `vg::Color` → VIZIA `Color`
 
+### Theme Color Design
+
+**Dark mode:**
+- Base tint: purple `#cc7eb1` / deep purple `#663f58`
+- Background gradient: `#2B2652` (top) → `#1E1A40` (bottom)
+- Text: pure white with varying alpha
+- Glass/panel backgrounds: `rgba(204, 126, 177, alpha)` (purple tint)
+
+**Glass mode:**
+- Base tint: sky blue `#89c3eb`
+- Background gradient: `#F2F6FB` (top) → `#FAFBFD` (bottom, near-white)
+- Text: dark navy with varying alpha
+- Glass/panel backgrounds: `rgba(137, 195, 235, alpha)` (#89c3eb tint)
+
 ### About Dialog Details
 
 - `AboutDialog` in `about.rs` — full-screen overlay with centered panel
-- Logo: `include_bytes!("../../ivylace_logo.png")` → `image` crate decode → femtovg texture (lazy init via `Cell<Option<vg::ImageId>>`)
+- **Dual logo:** `ivylace_logo.png` (Glass mode) / `ivylace_logo_dark.png` (Dark mode)
+  - Both embedded via `include_bytes!` → decoded by `image` crate at widget creation
+  - Lazy GPU upload via `Cell<Option<vg::ImageId>>` per logo (separate glass/dark cache)
+  - `ensure_logo(canvas, mode)` returns `(ImageId, width, height)` for current theme
 - Font: Noto Sans Regular (Latin) + Noto Sans JP kana subset (Japanese fallback), `paint.set_font(&[latin, jp])`
 - Event: click anywhere to close; `hoverable()` uses lens to only intercept events when visible
 - SelfDirected positioning (absolute overlay on top of all widgets)
+
+### Header Layout Details
+
+- Header bar: `height(Pixels(70.0))`, contains left/center/right groups
+- Center group (SAT TYPE / OS REALTIME / OS RENDER):
+  - Parent HStack has `child_top(Stretch(1.0))` + `child_bottom(Stretch(1.0))` for vertical centering
+  - Each `SegmentedParam` directly placed (no VStack wrapper) with `.height(Auto)` so it sizes to content
+  - Parent's child centering places the Auto-sized SegmentedParam in the center of available height
+  - Dividers are `Element` with `height(Pixels(32.0))` + `top/bottom(Stretch(1.0))` for self-centering
 
 ## Coding Conventions
 
@@ -172,12 +200,16 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Full VIZIA GUI with custom widgets:
   - GlassKnob (3 sizes), GR meters, crossover display
   - Segmented controls, toggle buttons
-  - Spectrum analyzer (in-crate FFT)
+  - Spectrum analyzer (in-crate FFT, currently unused in layout)
   - Header with global controls + theme toggle
 - **Dark / Glass dual theme** with lens-based reactive colors
-- **About dialog** with embedded logo, version, author name, GitHub link
+  - Dark: purple-tinted glassmorphism (`#cc7eb1` / `#663f58`), gradient background `#2B2652` → `#1E1A40`
+  - Glass: sky blue tint (`#89c3eb`), near-white gradient background `#F2F6FB` → `#FAFBFD`
+- **About dialog** with theme-dependent logo (glass/dark), version, author name, GitHub link
 - **Band threshold linking** (v0.4.2)
 - **GitHub Actions CI** (macOS Universal + Windows)
+- **Improved label visibility** for segmented controls (v0.4.4)
+- **Header controls vertically centered** (v0.4.4)
 
 ### TODO
 
@@ -196,6 +228,10 @@ GitHub Actions (`.github/workflows/build.yml`):
    - Unit tests for each DSP module
    - Frequency response verification for crossover
 
+5. **Spectrum Analyzer Integration**
+   - Wire `SpectrumAnalyzer` widget into the editor layout
+   - Currently implemented but not displayed in the GUI
+
 ## Important Design Decisions
 
 - **Why f64 internal?** IIR filter coefficient precision. Biquad filters accumulate rounding errors over time; f64 prevents audible artifacts especially at low frequencies.
@@ -205,6 +241,9 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **Why gesture split?** Cubase ignores `perform_edit` when `begin_edit`/`perform_edit`/`end_edit` happen in one callback. Splitting across MouseDown/MouseUp fixes this.
 - **Why dynamic hoverable for About dialog?** VIZIA's hit-testing selects the topmost hoverable element; a full-screen overlay with `hoverable(true)` blocks all events below. Using `Data::params.map(...)` lens for `hoverable()` makes the overlay only intercept events when visible.
 - **Why embed a JP font subset?** Noto Sans Regular (bundled with nih-plug) is Latin-only. femtovg supports font fallback via `paint.set_font(&[font1, font2])`. A 92KB Noto Sans JP kana subset covers all needed Japanese characters.
+- **Why BackgroundGradient as SelfDirected View?** VIZIA doesn't support gradient backgrounds via layout properties. A custom View with `position_type(SelfDirected)` and `hoverable(false)` draws a femtovg gradient behind all other content without interfering with event handling.
+- **Why `height(Auto)` on header SegmentedParam?** When placed directly in an HStack with `child_top/child_bottom(Stretch(1.0))`, `height(Auto)` lets the widget shrink to its content size (label + button row ≈ 29px), allowing the parent HStack to center it vertically. Previous approaches with VStack wrappers or `height(Stretch(1.0))` caused layout issues (content spreading, labels separating from buttons).
+- **Why dual logo in About dialog?** The Glass mode logo uses dark text on light background; the Dark mode logo uses light text on dark background. Both are compiled-in via `include_bytes!` and lazily uploaded to GPU with separate `Cell<Option<vg::ImageId>>` caches.
 
 ## Dependencies
 
