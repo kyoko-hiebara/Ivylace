@@ -1,4 +1,6 @@
-# Ivylace
+<p align="center">
+  <img src="ivylace_logo_dark.png" alt="Ivylace" width="320">
+</p>
 
 Multiband glue compressor with per-band analog saturation.
 Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
