@@ -71,7 +71,8 @@ impl SidechainHpf {
         let w0 = 2.0 * PI * freq / sample_rate;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
-        let alpha = sin_w0 / (2.0 * 2.0_f64.sqrt());
+        // Q = 1/sqrt(2) (Butterworth): alpha = sin(w0) / (2*Q) = sin(w0) * sqrt(2) / 2
+        let alpha = sin_w0 * std::f64::consts::FRAC_1_SQRT_2;
 
         let a0 = 1.0 + alpha;
         self.b0 = ((1.0 + cos_w0) / 2.0) / a0;
@@ -323,5 +324,94 @@ impl SslCompressor {
         let out_r = right * (1.0 - self.mix) + wet_r * self.mix;
 
         (out_l, out_r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test compressor gain at various frequencies with SC HPF at 80Hz.
+    /// The bugged alpha (Q=√2 resonant) in SC HPF causes the sidechain to see
+    /// a resonant boost around 80Hz, leading to MORE compression there and
+    /// LESS compression at very low freqs → apparent low-end boost.
+    #[test]
+    fn test_compressor_with_sc_hpf_80() {
+        let sr = 44100.0;
+        let test_freqs = [10.0, 20.0, 25.0, 30.0, 50.0, 80.0, 100.0, 500.0, 1000.0];
+
+        eprintln!("--- SC HPF = 80Hz (with current bugged alpha) ---");
+        for &test_freq in &test_freqs {
+            let mut comp = SslCompressor::new(sr);
+            comp.set_threshold(-20.0);
+            comp.set_ratio(4.0);
+            comp.set_attack_ms(10.0);
+            comp.set_release_ms(300.0);
+            comp.set_makeup_db(0.0);
+            comp.set_sidechain_hpf(80.0); // SC HPF at 80Hz
+            comp.set_enabled(true);
+
+            let amplitude = 0.5;
+            let settle = 88200;
+            for i in 0..settle {
+                let t = i as f64 / sr;
+                let input = amplitude * (2.0 * PI * test_freq * t).sin();
+                comp.process(input, input);
+            }
+
+            let measure = 88200;
+            let mut sum_sq_in = 0.0f64;
+            let mut sum_sq_out = 0.0f64;
+            for i in 0..measure {
+                let t = (settle + i) as f64 / sr;
+                let input = amplitude * (2.0 * PI * test_freq * t).sin();
+                let (out_l, _) = comp.process(input, input);
+                sum_sq_in += input * input;
+                sum_sq_out += out_l * out_l;
+            }
+
+            let gain_db = 10.0 * (sum_sq_out / sum_sq_in).log10();
+            eprintln!(
+                "  SC HPF 80Hz, comp gain at {:>6.1}Hz: {:>+.3} dB  (GR: {:.3} dB)",
+                test_freq, gain_db, comp.gain_reduction_db()
+            );
+        }
+
+        eprintln!("--- SC HPF = 0Hz (bypass) ---");
+        for &test_freq in &test_freqs {
+            let mut comp = SslCompressor::new(sr);
+            comp.set_threshold(-20.0);
+            comp.set_ratio(4.0);
+            comp.set_attack_ms(10.0);
+            comp.set_release_ms(300.0);
+            comp.set_makeup_db(0.0);
+            comp.set_sidechain_hpf(0.0); // bypass SC HPF
+            comp.set_enabled(true);
+
+            let amplitude = 0.5;
+            let settle = 88200;
+            for i in 0..settle {
+                let t = i as f64 / sr;
+                let input = amplitude * (2.0 * PI * test_freq * t).sin();
+                comp.process(input, input);
+            }
+
+            let measure = 88200;
+            let mut sum_sq_in = 0.0f64;
+            let mut sum_sq_out = 0.0f64;
+            for i in 0..measure {
+                let t = (settle + i) as f64 / sr;
+                let input = amplitude * (2.0 * PI * test_freq * t).sin();
+                let (out_l, _) = comp.process(input, input);
+                sum_sq_in += input * input;
+                sum_sq_out += out_l * out_l;
+            }
+
+            let gain_db = 10.0 * (sum_sq_out / sum_sq_in).log10();
+            eprintln!(
+                "  SC HPF OFF, comp gain at {:>6.1}Hz: {:>+.3} dB  (GR: {:.3} dB)",
+                test_freq, gain_db, comp.gain_reduction_db()
+            );
+        }
     }
 }

@@ -1,5 +1,6 @@
 /// Global controls header bar.
-/// Contains: Input Gain, Mix, Sat Type, OS Realtime, OS Render, Output Gain, Theme Toggle.
+/// Contains: Input Gain, Mix, Sat Type, OS Realtime, OS Render, Output Gain, Delta Monitor, Theme Toggle.
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -102,8 +103,10 @@ impl Header {
                 .border_width(Pixels(1.0))
                 .border_radius(Pixels(8.0));
 
-                // ── Right group: Out Gain + Theme Toggle ──
+                // ── Right group: Out Gain + Delta Monitor + Theme Toggle ──
                 let gm_right = gm.clone();
+                let p_right = Data::params.get(cx);
+                let delta_monitor = p_right.delta_monitor.clone();
                 HStack::new(cx, move |cx| {
                     GlassKnob::new(
                         cx,
@@ -114,6 +117,7 @@ impl Header {
                         "Out Gain",
                         gm_right.clone(),
                     );
+                    DeltaMonitorToggle::new(cx, delta_monitor.clone(), gm_right.clone());
                     ThemeToggle::new(cx, gm_right.clone());
                 })
                 .col_between(Pixels(12.0))
@@ -138,6 +142,122 @@ impl Header {
 impl View for Header {
     fn element(&self) -> Option<&'static str> {
         Some("header")
+    }
+}
+
+// ── Delta Monitor Toggle ────────────────────────────────────
+
+struct DeltaMonitorToggle {
+    delta_monitor: Arc<AtomicBool>,
+    glass_mode: Arc<AtomicBool>,
+    font_id: Cell<Option<vg::FontId>>,
+}
+
+impl DeltaMonitorToggle {
+    fn new(cx: &mut Context, delta_monitor: Arc<AtomicBool>, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self> {
+        Self { delta_monitor, glass_mode, font_id: Cell::new(None) }
+            .build(cx, |_| {})
+            .width(Pixels(38.0))
+            .height(Pixels(28.0))
+            .cursor(CursorIcon::Hand)
+    }
+
+    fn ensure_font(&self, canvas: &mut Canvas) -> Option<vg::FontId> {
+        match self.font_id.get() {
+            Some(id) => Some(id),
+            None => {
+                let id = canvas.add_font_mem(nih_plug_vizia::assets::fonts::NOTO_SANS_REGULAR).ok();
+                if let Some(id) = id {
+                    self.font_id.set(Some(id));
+                }
+                id
+            }
+        }
+    }
+}
+
+impl View for DeltaMonitorToggle {
+    fn element(&self) -> Option<&'static str> {
+        Some("delta-monitor-toggle")
+    }
+
+    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+        let bounds = cx.bounds();
+        if bounds.w < 1.0 || bounds.h < 1.0 {
+            return;
+        }
+
+        let active = self.delta_monitor.load(Ordering::Relaxed);
+        let mode = if self.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark };
+        let dpi = cx.scale_factor();
+
+        // Button background
+        let mut path = vg::Path::new();
+        path.rounded_rect(bounds.x, bounds.y, bounds.w, bounds.h, 4.0 * dpi);
+
+        if active {
+            // Active: delta accent color (cyan/teal)
+            let active_color = theme::delta_monitor_active(mode);
+            let paint = vg::Paint::linear_gradient(
+                bounds.x, bounds.y,
+                bounds.x, bounds.y + bounds.h,
+                vg::Color::rgbaf(active_color.r, active_color.g, active_color.b, 0.93),
+                vg::Color::rgbaf(active_color.r, active_color.g, active_color.b, 0.80),
+            );
+            canvas.fill_path(&path, &paint);
+
+            let mut border_paint = vg::Paint::color(theme::with_alpha(active_color, 0.53));
+            border_paint.set_line_width(1.0 * dpi);
+            canvas.stroke_path(&path, &border_paint);
+
+            // Glow
+            let glow = vg::Paint::box_gradient(
+                bounds.x - 2.0, bounds.y - 2.0,
+                bounds.w + 4.0, bounds.h + 4.0,
+                6.0, 8.0,
+                theme::with_alpha(active_color, 0.25),
+                vg::Color::rgba(0, 0, 0, 0),
+            );
+            let mut glow_path = vg::Path::new();
+            glow_path.rect(bounds.x - 8.0, bounds.y - 8.0, bounds.w + 16.0, bounds.h + 16.0);
+            canvas.fill_path(&glow_path, &glow);
+        } else {
+            canvas.fill_path(&path, &vg::Paint::color(theme::toggle_off_bg(mode)));
+            let mut border_paint = vg::Paint::color(theme::toggle_off_border(mode));
+            border_paint.set_line_width(1.0 * dpi);
+            canvas.stroke_path(&path, &border_paint);
+        }
+
+        // "DELTA" label
+        if let Some(font) = self.ensure_font(canvas) {
+            let text_color = if active {
+                theme::text_on_active(mode)
+            } else {
+                theme::toggle_off_text(mode)
+            };
+            let mut paint = vg::Paint::color(text_color);
+            paint.set_font_size(9.0 * dpi);
+            paint.set_text_align(vg::Align::Center);
+            paint.set_text_baseline(vg::Baseline::Middle);
+            paint.set_font(&[font]);
+            let _ = canvas.fill_text(
+                bounds.x + bounds.w * 0.5,
+                bounds.y + bounds.h * 0.5,
+                "DELTA",
+                &paint,
+            );
+        }
+    }
+
+    fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
+        event.map(|window_event, meta| {
+            if let WindowEvent::MouseDown(MouseButton::Left) = window_event {
+                let current = self.delta_monitor.load(Ordering::Relaxed);
+                self.delta_monitor.store(!current, Ordering::Relaxed);
+                cx.needs_redraw();
+                meta.consume();
+            }
+        });
     }
 }
 

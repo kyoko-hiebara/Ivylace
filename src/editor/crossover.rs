@@ -12,7 +12,7 @@ use super::theme::{self, ThemeMode};
 use super::Data;
 
 const DISPLAY_HEIGHT: f32 = 72.0;
-const FREQ_MIN: f32 = 20.0;
+const FREQ_MIN: f32 = 30.0;
 const FREQ_MAX: f32 = 20000.0;
 const GRID_FREQS: [f32; 8] = [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0];
 

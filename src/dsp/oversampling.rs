@@ -201,11 +201,16 @@ impl StereoOversampler2x {
 /// Supports 1x, 2x, and 4x oversampling
 #[derive(Clone)]
 pub struct BandOversampler {
-    /// First 2x stage (used for 2x and 4x)
+    /// First 2x stage (used for 2x and 4x) — wet path
     stage1: StereoOversampler2x,
-    /// Second 2x stage (used only for 4x)
+    /// Second 2x stage (used only for 4x) — wet path
     stage2_a: StereoOversampler2x,
     stage2_b: StereoOversampler2x,
+    /// Dry path downsamplers — provide latency-matched dry signal
+    /// (shares upsamplers with wet path, has separate downsamplers)
+    dry_stage1: StereoOversampler2x,
+    dry_stage2_a: StereoOversampler2x,
+    dry_stage2_b: StereoOversampler2x,
     /// Current factor
     factor: OversamplingFactor,
 }
@@ -216,6 +221,9 @@ impl BandOversampler {
             stage1: StereoOversampler2x::new(),
             stage2_a: StereoOversampler2x::new(),
             stage2_b: StereoOversampler2x::new(),
+            dry_stage1: StereoOversampler2x::new(),
+            dry_stage2_a: StereoOversampler2x::new(),
+            dry_stage2_b: StereoOversampler2x::new(),
             factor: OversamplingFactor::X1,
         }
     }
@@ -224,6 +232,9 @@ impl BandOversampler {
         self.stage1.reset();
         self.stage2_a.reset();
         self.stage2_b.reset();
+        self.dry_stage1.reset();
+        self.dry_stage2_a.reset();
+        self.dry_stage2_b.reset();
     }
 
     pub fn set_factor(&mut self, factor: OversamplingFactor) {
@@ -238,14 +249,18 @@ impl BandOversampler {
     }
 
     /// Process a stereo sample pair through the oversampled callback.
+    /// Returns (wet_l, wet_r, dry_l, dry_r).
+    /// The dry output goes through the same FIR up/down path as wet
+    /// (identity processing), ensuring latency-matched dry/wet mixing.
     #[inline(always)]
-    pub fn process<F>(&mut self, left: f64, right: f64, mut f: F) -> (f64, f64)
+    pub fn process<F>(&mut self, left: f64, right: f64, mut f: F) -> (f64, f64, f64, f64)
     where
         F: FnMut(f64, f64) -> (f64, f64),
     {
         match self.factor {
             OversamplingFactor::X1 => {
-                f(left, right)
+                let (wet_l, wet_r) = f(left, right);
+                (wet_l, wet_r, left, right)
             }
             OversamplingFactor::X2 => {
                 let (up_l, up_r) = self.stage1.upsample(left, right);
@@ -253,7 +268,11 @@ impl BandOversampler {
                 let (proc_l0, proc_r0) = f(up_l[0], up_r[0]);
                 let (proc_l1, proc_r1) = f(up_l[1], up_r[1]);
 
-                self.stage1.downsample([proc_l0, proc_l1], [proc_r0, proc_r1])
+                let (wet_l, wet_r) = self.stage1.downsample(
+                    [proc_l0, proc_l1], [proc_r0, proc_r1]);
+                // Dry: downsample the upsampled signal (identity) through separate FIR
+                let (dry_l, dry_r) = self.dry_stage1.downsample(up_l, up_r);
+                (wet_l, wet_r, dry_l, dry_r)
             }
             OversamplingFactor::X4 => {
                 let (up2_l, up2_r) = self.stage1.upsample(left, right);
@@ -266,10 +285,17 @@ impl BandOversampler {
                 let (p_l2, p_r2) = f(up4_l1[0], up4_r1[0]);
                 let (p_l3, p_r3) = f(up4_l1[1], up4_r1[1]);
 
+                // Wet downsample
                 let (d2_l0, d2_r0) = self.stage2_a.downsample([p_l0, p_l1], [p_r0, p_r1]);
                 let (d2_l1, d2_r1) = self.stage2_b.downsample([p_l2, p_l3], [p_r2, p_r3]);
+                let (wet_l, wet_r) = self.stage1.downsample([d2_l0, d2_l1], [d2_r0, d2_r1]);
 
-                self.stage1.downsample([d2_l0, d2_l1], [d2_r0, d2_r1])
+                // Dry: downsample upsampled signal (identity) through separate FIR
+                let (dd2_l0, dd2_r0) = self.dry_stage2_a.downsample(up4_l0, up4_r0);
+                let (dd2_l1, dd2_r1) = self.dry_stage2_b.downsample(up4_l1, up4_r1);
+                let (dry_l, dry_r) = self.dry_stage1.downsample([dd2_l0, dd2_l1], [dd2_r0, dd2_r1]);
+
+                (wet_l, wet_r, dry_l, dry_r)
             }
         }
     }
@@ -364,17 +390,89 @@ mod tests {
         let mut band = BandOversampler::new();
         band.set_factor(OversamplingFactor::X4);
         let dc_value = 0.5;
-        let mut last_l = 0.0;
+        let mut last_wet = 0.0;
+        let mut last_dry = 0.0;
         for _ in 0..500 {
-            let (l, _r) = band.process(dc_value, dc_value, |l, r| (l, r));
-            last_l = l;
+            let (wet_l, _wet_r, dry_l, _dry_r) = band.process(dc_value, dc_value, |l, r| (l, r));
+            last_wet = wet_l;
+            last_dry = dry_l;
         }
-        let error = (last_l - dc_value).abs();
+        let error_wet = (last_wet - dc_value).abs();
+        let error_dry = (last_dry - dc_value).abs();
         assert!(
-            error < 0.002,
-            "4x DC roundtrip error: input={}, output={}, error={}",
-            dc_value, last_l, error
+            error_wet < 0.002,
+            "4x DC wet roundtrip error: input={}, output={}, error={}",
+            dc_value, last_wet, error_wet
         );
+        assert!(
+            error_dry < 0.002,
+            "4x DC dry roundtrip error: input={}, output={}, error={}",
+            dc_value, last_dry, error_dry
+        );
+    }
+
+    /// Test that a very low frequency sine (25Hz) passes through 2x/4x at near unity gain.
+    #[test]
+    fn test_roundtrip_sine_25hz() {
+        let sr = 44100.0_f64;
+        let freq = 25.0_f64;
+
+        // Test 2x
+        {
+            let mut os = Oversampler2x::new();
+            let warmup = 4000;
+            for i in 0..warmup {
+                let t = i as f64 / sr;
+                let input = (2.0 * std::f64::consts::PI * freq * t).sin();
+                let up = os.upsample(input);
+                let _out = os.downsample(up);
+            }
+            let measure = 4000;
+            let mut sum_sq_in = 0.0_f64;
+            let mut sum_sq_out = 0.0_f64;
+            for i in 0..measure {
+                let t = (warmup + i) as f64 / sr;
+                let input = (2.0 * std::f64::consts::PI * freq * t).sin();
+                let up = os.upsample(input);
+                let out = os.downsample(up);
+                sum_sq_in += input * input;
+                sum_sq_out += out * out;
+            }
+            let gain_db = 10.0 * (sum_sq_out / sum_sq_in).log10();
+            assert!(
+                gain_db.abs() < 0.5,
+                "2x 25Hz roundtrip gain: {:.3} dB (should be ~0 dB)",
+                gain_db
+            );
+        }
+
+        // Test 4x
+        {
+            let mut band = BandOversampler::new();
+            band.set_factor(OversamplingFactor::X4);
+            let warmup = 4000;
+            for i in 0..warmup {
+                let t = i as f64 / sr;
+                let input = (2.0 * std::f64::consts::PI * freq * t).sin();
+                band.process(input, input, |l, r| (l, r));
+            }
+            let measure = 4000;
+            let mut sum_sq_in = 0.0_f64;
+            let mut sum_sq_out = 0.0_f64;
+            for i in 0..measure {
+                let t = (warmup + i) as f64 / sr;
+                let input = (2.0 * std::f64::consts::PI * freq * t).sin();
+                let (wet_l, _, _, _) = band.process(input, input, |l, r| (l, r));
+                sum_sq_in += input * input;
+                sum_sq_out += wet_l * wet_l;
+            }
+            let gain_db = 10.0 * (sum_sq_out / sum_sq_in).log10();
+            assert!(
+                gain_db.abs() < 0.5,
+                "4x 25Hz roundtrip gain: {:.3} dB (should be ~0 dB)",
+                gain_db
+            );
+        }
     }
 
     /// Test that a low-frequency sine wave passes through 2x at near unity gain.

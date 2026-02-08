@@ -38,9 +38,8 @@ impl Biquad {
         let w0 = 2.0 * PI * freq / sample_rate;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
-        // Q = 0.7071 (Butterworth)
-        let alpha = sin_w0 / (2.0 * std::f64::consts::FRAC_1_SQRT_2.recip());
-        let alpha = sin_w0 / (2.0 * 2.0_f64.sqrt());
+        // Q = 1/sqrt(2) (Butterworth): alpha = sin(w0) / (2*Q) = sin(w0) * sqrt(2) / 2
+        let alpha = sin_w0 * std::f64::consts::FRAC_1_SQRT_2;
 
         let a0 = 1.0 + alpha;
         self.b0 = ((1.0 - cos_w0) / 2.0) / a0;
@@ -55,7 +54,8 @@ impl Biquad {
         let w0 = 2.0 * PI * freq / sample_rate;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
-        let alpha = sin_w0 / (2.0 * 2.0_f64.sqrt());
+        // Q = 1/sqrt(2) (Butterworth): alpha = sin(w0) / (2*Q) = sin(w0) * sqrt(2) / 2
+        let alpha = sin_w0 * std::f64::consts::FRAC_1_SQRT_2;
 
         let a0 = 1.0 + alpha;
         self.b0 = ((1.0 + cos_w0) / 2.0) / a0;
@@ -206,5 +206,186 @@ impl FourBandCrossover {
         }
 
         (out_l, out_r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test crossover gain at very low frequencies (5-30Hz) to check for sub-bass boost.
+    #[test]
+    fn test_crossover_sub_bass_gain() {
+        let sr = 44100.0;
+        let test_freqs = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 50.0, 100.0];
+
+        for &test_freq in &test_freqs {
+            let mut xover = FourBandCrossover::new(sr);
+            xover.set_frequencies([120.0, 1500.0, 8000.0]);
+
+            let settle = 88200; // 2 seconds to settle low-freq filters
+            for i in 0..settle {
+                let t = i as f64 / sr;
+                let input = (2.0 * PI * test_freq * t).sin();
+                xover.process(input, input);
+            }
+
+            let measure = 88200;
+            let mut sum_sq_sum = 0.0f64;
+            let mut sum_sq_input = 0.0f64;
+
+            for i in 0..measure {
+                let t = (settle + i) as f64 / sr;
+                let input = (2.0 * PI * test_freq * t).sin();
+                let (bands_l, _) = xover.process(input, input);
+                let band_sum: f64 = bands_l.iter().sum();
+                sum_sq_sum += band_sum * band_sum;
+                sum_sq_input += input * input;
+            }
+
+            let gain_db = 10.0 * (sum_sq_sum / sum_sq_input).log10();
+            eprintln!("Crossover gain at {test_freq:>6.1}Hz: {gain_db:>+.4} dB");
+            assert!(
+                gain_db.abs() < 1.0,
+                "Crossover gain at {test_freq}Hz should be near 0dB, got {gain_db:.3}dB"
+            );
+        }
+    }
+
+    /// Verify that the 4-band crossover reconstructs a DC signal with unity gain.
+    #[test]
+    fn test_crossover_dc_unity() {
+        let sr = 44100.0;
+        let mut xover = FourBandCrossover::new(sr);
+        xover.set_frequencies([120.0, 1500.0, 8000.0]);
+
+        // Settle the filters
+        for _ in 0..4096 {
+            xover.process(1.0, 1.0);
+        }
+
+        // Check that band sum ≈ input
+        let (bands_l, bands_r) = xover.process(1.0, 1.0);
+        let sum_l: f64 = bands_l.iter().sum();
+        let sum_r: f64 = bands_r.iter().sum();
+        assert!(
+            (sum_l - 1.0).abs() < 1e-6,
+            "DC sum L should be 1.0, got {sum_l}"
+        );
+        assert!(
+            (sum_r - 1.0).abs() < 1e-6,
+            "DC sum R should be 1.0, got {sum_r}"
+        );
+    }
+
+    /// Verify that 4-band crossover sum has flat magnitude (allpass) for sine waves.
+    /// Uses RMS gain comparison: RMS(band_sum) / RMS(input) should be ~1.0 (0dB).
+    #[test]
+    fn test_crossover_flat_magnitude_sine() {
+        let sr = 44100.0;
+        let test_freqs = [60.0, 120.0, 500.0, 1500.0, 4000.0, 8000.0, 15000.0];
+
+        for &test_freq in &test_freqs {
+            let mut xover = FourBandCrossover::new(sr);
+            xover.set_frequencies([120.0, 1500.0, 8000.0]);
+
+            let settle = 44100;
+            for i in 0..settle {
+                let t = i as f64 / sr;
+                let input = (2.0 * PI * test_freq * t).sin();
+                xover.process(input, input);
+            }
+
+            let measure = 44100;
+            let mut sum_sq_sum = 0.0f64;
+            let mut sum_sq_input = 0.0f64;
+
+            for i in 0..measure {
+                let t = (settle + i) as f64 / sr;
+                let input = (2.0 * PI * test_freq * t).sin();
+                let (bands_l, _) = xover.process(input, input);
+                let band_sum: f64 = bands_l.iter().sum();
+                sum_sq_sum += band_sum * band_sum;
+                sum_sq_input += input * input;
+            }
+
+            let gain_db = 10.0 * (sum_sq_sum / sum_sq_input).log10();
+            // Nested LR4 topology introduces small (~0.6dB) dips at crossover
+            // frequencies due to allpass phase interaction between stages.
+            // This is inherent to the tree-structured IIR crossover design.
+            assert!(
+                gain_db.abs() < 1.0,
+                "Crossover gain at {test_freq}Hz should be near 0dB, got {gain_db:.3}dB"
+            );
+        }
+    }
+
+    /// Test a single LR4 crossover point: LP + HP magnitude should be flat (allpass).
+    #[test]
+    fn test_lr4_crossover_point_allpass() {
+        let sr = 44100.0;
+        let test_freqs = [60.0, 120.0, 500.0, 1500.0, 4000.0, 8000.0, 15000.0];
+
+        for &test_freq in &test_freqs {
+            let mut xp = CrossoverPoint::default();
+            xp.set_frequency(1500.0, sr);
+
+            let settle = 44100;
+            for i in 0..settle {
+                let t = i as f64 / sr;
+                xp.process((2.0 * PI * test_freq * t).sin());
+            }
+
+            let measure = 44100;
+            let mut sum_sq_sum = 0.0f64;
+            let mut sum_sq_input = 0.0f64;
+
+            for i in 0..measure {
+                let t = (settle + i) as f64 / sr;
+                let input = (2.0 * PI * test_freq * t).sin();
+                let (lo, hi) = xp.process(input);
+                let band_sum = lo + hi;
+                sum_sq_sum += band_sum * band_sum;
+                sum_sq_input += input * input;
+            }
+
+            let gain_db = 10.0 * (sum_sq_sum / sum_sq_input).log10();
+            assert!(
+                gain_db.abs() < 0.1,
+                "LR4 point gain at {test_freq}Hz should be ~0dB, got {gain_db:.3}dB"
+            );
+        }
+    }
+
+    /// Test 2nd-order Butterworth LP at cutoff: should be -3dB.
+    #[test]
+    fn test_butterworth_lp_at_cutoff() {
+        let sr = 44100.0;
+        let fc = 1500.0;
+        let mut bq = Biquad::default();
+        bq.set_lowpass(fc, sr);
+
+        let settle = 44100;
+        for i in 0..settle {
+            let t = i as f64 / sr;
+            bq.process((2.0 * PI * fc * t).sin());
+        }
+
+        let measure = 44100;
+        let mut sum_sq_out = 0.0f64;
+        let mut sum_sq_in = 0.0f64;
+        for i in 0..measure {
+            let t = (settle + i) as f64 / sr;
+            let input = (2.0 * PI * fc * t).sin();
+            let output = bq.process(input);
+            sum_sq_out += output * output;
+            sum_sq_in += input * input;
+        }
+
+        let gain_db = 10.0 * (sum_sq_out / sum_sq_in).log10();
+        assert!(
+            (gain_db - (-3.01)).abs() < 0.5,
+            "Butterworth LP at cutoff should be ~-3dB, got {gain_db:.2}dB"
+        );
     }
 }

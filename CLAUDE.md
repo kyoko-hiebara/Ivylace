@@ -42,14 +42,14 @@ ivylace/
     │   ├── toggle.rs       # ToggleButton: bool param toggle (Normal/Solo/Sat/Power)
     │   ├── band_strip.rs   # BandStrip: per-band control strip
     │   ├── header.rs       # Header: global controls bar + ThemeToggle
-    │   ├── spectrum.rs     # SpectrumAnalyzer: real-time FFT display (currently unused)
+    │   ├── spectrum.rs     # SpectrumAnalyzer: delta spectrum display (pre/post difference, cut=blue/boost=orange)
     │   └── about.rs        # AboutDialog: overlay with theme-dependent logo, version, author, GitHub link
     └── dsp/
         ├── mod.rs          # Module declarations
         ├── crossover.rs    # 4-band LR4 (24dB/oct) Linkwitz-Riley crossover
         ├── compressor.rs   # SSL 4000G-style VCA compressor (per-band)
         ├── saturation.rs   # Analog saturation (Tube/Tape/Console, per-band)
-        ├── oversampling.rs # 2x/4x oversampling for saturation
+        ├── oversampling.rs # 2x/4x oversampling (halfband FIR, zero-stuffing)
         ├── gr_meter.rs     # Gain reduction metering (lock-free AtomicF32)
         └── spectrum.rs     # FFT + lock-free triple-buffer for spectrum analyzer
 ```
@@ -63,10 +63,13 @@ Input → Input Gain
     → Band 1 (LowMid):  120–1500Hz
     → Band 2 (HighMid): 1500–8000Hz
     → Band 3 (High):    8000Hz–Nyquist
-  → [Per Band] SslCompressor → BandSaturation (oversampled)
-  → Sum all bands (with solo logic)
+  → [Per Band] Oversampler(SslCompressor → BandSaturation)
+    └─ spectrum pre/post captured inside oversampled domain
+  → Dry = crossover band sum (phase-coherent with wet)
+  → Wet = processed band sum (with solo logic)
   → Dry/Wet Mix
   → Output Gain
+  → Bypass check (VST3 kIsBypass, early return)
 ```
 
 ## Key DSP Modules
@@ -89,6 +92,20 @@ Input → Input Gain
 - Per-band drive + enable with auto-gain compensation
 - DC blocker (~5Hz HPF) after saturation
 - **Band 0 (Low) saturation is OFF by default** for EDM sub-bass integrity
+
+### oversampling.rs — MultibandOversampler / BandOversampler
+- Halfband FIR filter (15-tap Kaiser-windowed sinc, symmetric)
+- Explicit zero-stuffing approach: upsample inserts `[input*2, 0]`, each filtered through FIR
+- Downsample: filter both samples, keep every other output
+- 2x/4x cascade (4x = two 2x stages)
+- Separate realtime/render oversampling factor (selected per process mode)
+- Compressor sample rate compensated to effective_sr = base_sr × OS multiplier
+
+### spectrum.rs (dsp) — SpectrumBuffer
+- Lock-free triple-buffer for audio→GUI sample transfer
+- 8192-point in-crate radix-2 Cooley-Tukey FFT
+- Hann window applied before FFT
+- Pre/post both captured inside oversampled domain (FIR rolloff cancels in delta)
 
 ## GUI Architecture
 
@@ -186,7 +203,7 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Linux は対象外
 - タグ `v*` プッシュで GitHub Release (draft) 自動作成
 
-## Current State (v0.5.1)
+## Current State (v0.5.2)
 
 ### Implemented
 - 4-band LR4 crossover with adjustable frequencies
@@ -218,6 +235,9 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **DAW bypass support** (v0.5.1): VST3 kIsBypass flag for Cubase bypass button
 - **Oversampling fixes** (v0.5.1): rewritten halfband FIR, correct compressor sample rate at 2x/4x, phase-coherent dry/wet mix
 - **GR meter/spectrum range** (v0.5.1): ±6dB range for practical mastering use
+- **Delta monitor** (v0.5.2): audition wet−dry difference via header toggle button
+- **Sidechain HPF fix** (v0.5.2): corrected Butterworth Q factor (was resonant Q=√2, now flat Q=1/√2)
+- **Display range 30Hz+** (v0.5.2): spectrum/crossover display and crossover slider start at 30Hz to avoid sub-bass visual artifacts
 
 ### TODO
 
@@ -229,14 +249,11 @@ GitHub Actions (`.github/workflows/build.yml`):
    - Additional audio input for external sidechain
    - Requires `AuxiliaryBuffers` configuration in nih-plug
 
-3. **Stereo Width**
-   - Mid/Side processing option per band
-
-4. **Testing**
+3. **Testing**
    - Unit tests for each DSP module
    - Frequency response verification for crossover
 
-5. **Linear Phase Crossover Mode**
+4. **Linear Phase Crossover Mode**
    - FIR-based linear phase crossover option for mastering use cases
    - Zero phase rotation at crossover boundaries, better transient preservation
    - Trade-off: increased latency (hundreds of samples) + pre-ringing
@@ -253,6 +270,9 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **Why BackgroundGradient as SelfDirected View?** VIZIA doesn't support gradient backgrounds via layout properties. A custom View with `position_type(SelfDirected)` and `hoverable(false)` draws a femtovg gradient behind all other content without interfering with event handling.
 - **Why `height(Auto)` on header SegmentedParam?** When placed directly in an HStack with `child_top/child_bottom(Stretch(1.0))`, `height(Auto)` lets the widget shrink to its content size (label + button row ≈ 29px), allowing the parent HStack to center it vertically. Previous approaches with VStack wrappers or `height(Stretch(1.0))` caused layout issues (content spreading, labels separating from buttons).
 - **Why dual logo in About dialog?** The Glass mode logo uses dark text on light background; the Dark mode logo uses light text on dark background. Both are compiled-in via `include_bytes!` and lazily uploaded to GPU with separate `Cell<Option<vg::ImageId>>` caches.
+- **Why dry = crossover band sum?** Dry/wet mix requires phase-coherent dry and wet paths. Raw input hasn't passed through the crossover's LR4 filters, so mixing it with the wet path (which has) causes phase cancellation. Using the crossover band sum as dry ensures identical phase characteristics.
+- **Why capture spectrum pre/post inside oversampler callback?** The oversampler's FIR lowpass attenuates high frequencies. If pre is captured before the FIR and post after, the FIR rolloff appears as false "gain reduction" in the delta display. Capturing both inside the callback means both share the same FIR path, so the delta shows only comp+sat effects.
+- **Why explicit zero-stuffing instead of polyphase FIR?** The original polyphase decomposition had subtle indexing bugs (even/odd branch swap, center tap double-count) that caused DC gain errors. Explicit zero-stuffing with a standard FIR convolution is simpler to verify and test.
 
 ## Dependencies
 

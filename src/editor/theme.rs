@@ -471,6 +471,16 @@ pub fn spectrum_zero_line(mode: ThemeMode) -> vg::Color {
     }
 }
 
+// ── Delta monitor ───────────────────────────────────────────
+
+/// Active color for the delta monitor toggle (cyan/teal to stand out)
+pub fn delta_monitor_active(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgb(0x00, 0xCC, 0xCC),   // cyan/teal
+        ThemeMode::Glass => vg::Color::rgb(0x00, 0xA0, 0xA0),  // deeper teal
+    }
+}
+
 // ── About dialog ────────────────────────────────────────────
 
 pub fn about_overlay_bg(mode: ThemeMode) -> vg::Color {

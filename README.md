@@ -15,7 +15,7 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
   - Ratio: 2:1 / 4:1 / 10:1
 - **Sidechain HPF** per band (the key to "glue" compression)
 - **Soft knee** that adapts to ratio setting
-- **Parallel compression** via per-band mix control
+- **Parallel compression** via global dry/wet mix
 - **Band threshold linking**
 
 ### 4-Band Crossover
@@ -41,7 +41,9 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
   - Dark: purple-tinted glassmorphism with gradient background
   - Glass: sky blue (#89c3eb) tinted light theme with near-white background
 - **Custom GPU-rendered widgets** — glassmorphism knobs, GR meters, crossover display
+- **Delta spectrum analyzer** — real-time pre/post difference display (cut=blue, boost=orange), ±6dB range
 - **About dialog** — click title bar to view logo, version, and author info (theme-dependent logo)
+- **DAW bypass support** — VST3 bypass button (Cubase, etc.)
 - **Resizable window** (960 x 740 default)
 
 ### Band Layout
@@ -92,14 +94,14 @@ src/
 │   ├── toggle.rs           # Toggle button (LINK/Power/Solo/SAT)
 │   ├── band_strip.rs       # Per-band strip layout
 │   ├── header.rs           # Global controls bar + theme toggle (sun/moon)
-│   ├── spectrum.rs         # Spectrum analyzer (implemented, not yet in layout)
+│   ├── spectrum.rs         # Delta spectrum analyzer (pre/post difference display)
 │   └── about.rs            # About dialog overlay (theme-dependent logo)
 ├── dsp/
 │   ├── mod.rs
 │   ├── crossover.rs        # LR4 4-band crossover
 │   ├── compressor.rs       # SSL 4000G-style VCA compressor
 │   ├── saturation.rs       # Per-band analog saturation (Console/Tube/Tape)
-│   ├── oversampling.rs     # 2x/4x oversampling
+│   ├── oversampling.rs     # 2x/4x oversampling (halfband FIR, zero-stuffing)
 │   ├── gr_meter.rs         # Gain reduction metering (lock-free)
 │   └── spectrum.rs         # FFT + lock-free spectrum buffer
 └── assets/

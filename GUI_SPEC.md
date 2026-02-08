@@ -28,14 +28,14 @@ src/editor/
   toggle.rs       -- ToggleButton: bool param toggle (Normal/Solo/Sat/Power variants)
   band_strip.rs   -- BandStrip: per-band vertical strip composing all controls
   header.rs       -- Header: global controls bar (In/Out Gain, Mix, Sat Type, OS) + ThemeToggle
-  spectrum.rs     -- SpectrumAnalyzer: real-time FFT spectrum display (implemented, not yet in layout)
+  spectrum.rs     -- SpectrumAnalyzer: delta spectrum display (pre/post difference, cut=blue/boost=orange)
   about.rs        -- AboutDialog: full-screen overlay with theme-dependent logo, version, author, GitHub link
 
 assets/
   noto_sans_jp_kana.ttf  -- Noto Sans JP subset (hiragana/katakana) for femtovg fallback
 
 src/dsp/
-  spectrum.rs     -- SpectrumBuffer (lock-free triple-buffer), in-crate FFT (2048-pt)
+  spectrum.rs     -- SpectrumBuffer (lock-free triple-buffer), in-crate FFT (8192-pt)
 ```
 
 ### 1.3 Data Model
@@ -61,6 +61,7 @@ VStack (root)
   HStack (title bar, 28px) — TitleBarLabel (click → About dialog)
   Header (70px) — In/Out Gain, Mix, Sat Type, OS Realtime/Render, ThemeToggle
   CrossoverDisplay (96px)
+  SpectrumAnalyzer (80px) — delta display (cut=blue, boost=orange)
   HStack (band strips, Stretch)
     BandStrip x 4 (each Stretch(1.0))
   AboutDialog (SelfDirected overlay, full screen, conditionally hoverable)
@@ -183,8 +184,8 @@ Vertical gain reduction meter, 20x112px.
 - 20 segment lines
 - Fill from top (0dB) down: blue (#4A9EFF) gradient, red (#FF4466) at high GR
 - Peak hold line: red (#FF6B6B), 2px, 1s hold + exponential decay
-- Scale marks at 0, -6, -12, -20, -30 dB
-- Value readout below (-40 to 0 dB range) — lens-reactive color
+- Scale marks at 0, -2, -4, -6 dB
+- Value readout below (unlimited range, text only) — lens-reactive color
 - GR label — lens-reactive color
 
 **Data source**: `Data::gr_outputs.map(move |o| o.band_gr[band_idx].load())`
@@ -248,22 +249,26 @@ Boolean parameter toggle with 4 variants:
 
 ### 3.6 SpectrumAnalyzer (`spectrum.rs`)
 
-Real-time FFT spectrum display (implemented but not yet wired into editor layout).
+Delta spectrum display showing the difference between pre- and post-processing spectra. Height: 80px.
 
 **DSP** (`dsp/spectrum.rs`):
-- Triple-buffer `SpectrumBuffer`: lock-free audio-to-GUI sample transfer
-- In-crate radix-2 Cooley-Tukey FFT, 2048-point
+- Triple-buffer `SpectrumBuffer` (×2: pre + post): lock-free audio-to-GUI sample transfer
+- In-crate radix-2 Cooley-Tukey FFT, 8192-point
 - Hann window applied before FFT
-- Magnitude in dB (-120 to 0 dB range)
-- Audio thread pushes mono sum `(L+R)/2` (only when GUI is open)
+- Pre/post both captured inside oversampled domain (FIR rolloff cancels in delta)
+- Audio thread pushes mono band-sum averages (only when GUI is open)
 
 **Drawing**:
-- Background: semi-transparent dark
-- Log-frequency X axis (20Hz-20kHz, matching crossover display)
-- dB Y axis (-90 to 0 dB)
-- Filled path: gradient fill
-- Stroke: 1.5px
-- Exponential smoothing (0.8 factor) between frames
+- Background: theme-reactive
+- 0dB center line (horizontal)
+- Log-frequency X axis (20Hz–20kHz)
+- Delta range: ±6dB (symmetrical around 0dB center)
+- Cut (gain reduction): blue fill + stroke below center line
+- Boost (makeup/saturation): orange fill + stroke above center line
+- 1/3 octave smoothing kernel (triangular window, frequency-proportional)
+- Asymmetric temporal smoothing: attack=0.6, release=0.94
+- Noise gate at -90dB to suppress phantom display during silence
+- 2px step per point for smooth curves
 
 ### 3.7 AboutDialog (`about.rs`)
 
@@ -339,27 +344,31 @@ Compressor.gain_reduction_db()
 - `AtomicF32` lock-free sharing
 - ~689 Hz update rate @ 44.1kHz
 
-### 4.2 Spectrum Analyzer
+### 4.2 Spectrum Analyzer (Delta)
 
 ```
-[Audio Thread]                     [GUI Thread]
-Output samples (L+R)/2
+[Audio Thread]                         [GUI Thread]
+Per-band oversampler callback:
+  pre_acc += (l+r)*0.5 (before comp/sat)
+  post_acc += (sl+sr)*0.5 (after comp/sat)
        |
-  SpectrumBuffer.push(sample)
-       | (triple-buffer, per-sample)
-       | (buffer full: swap to next)
-
-  SpectrumBuffer.read()  <---  SpectrumAnalyzer::draw()
-                                       |
-                               Hann window + FFT
-                                       |
-                               Magnitude dB + smoothing
-                                       |
-                               femtovg path drawing
+  Average across OS samples
+       |
+  spectrum_pre.push(pre_acc)    --->   spectrum_pre.read()
+  spectrum_post.push(post_acc)  --->   spectrum_post.read()
+                                              |
+                                     Hann window + FFT (×2)
+                                              |
+                                     delta = post_dB - pre_dB
+                                              |
+                                     Noise gate + smoothing
+                                              |
+                                     femtovg path (cut=blue, boost=orange)
 ```
 
-- Triple-buffer pattern (no locks)
-- 2048-sample FFT window
+- Dual triple-buffer pattern (no locks, pre + post)
+- 8192-sample FFT window
+- Both pre/post captured inside oversampled domain (FIR rolloff cancels)
 - Only active when GUI is open (`editor_state.is_open()`)
 
 ---

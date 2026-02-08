@@ -12,7 +12,7 @@ use nih_plug_vizia::vizia::vg;
 use super::theme::{self, ThemeMode};
 use crate::dsp::spectrum::{self, FFT_SIZE, NUM_BINS, SpectrumBuffer};
 
-const FREQ_MIN: f32 = 20.0;
+const FREQ_MIN: f32 = 30.0;
 const FREQ_MAX: f32 = 20000.0;
 const DISPLAY_HEIGHT: f32 = 80.0;
 /// Delta dB range (symmetrical around 0)

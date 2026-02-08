@@ -57,6 +57,10 @@ pub struct IvylaceParams {
     #[persist = "glass-mode"]
     pub(crate) glass_mode: Arc<AtomicBool>,
 
+    /// Delta monitor mode (listen to wet−dry difference)
+    #[persist = "delta-monitor"]
+    pub(crate) delta_monitor: Arc<AtomicBool>,
+
     // --- Global ---
     #[id = "input_gain"]
     pub input_gain: FloatParam,
@@ -284,6 +288,7 @@ impl Default for Ivylace {
             params: Arc::new(IvylaceParams {
                 editor_state: editor::default_state(),
                 glass_mode: Arc::new(AtomicBool::new(false)),
+                delta_monitor: Arc::new(AtomicBool::new(false)),
 
                 input_gain: FloatParam::new(
                     "Input Gain",
@@ -324,7 +329,7 @@ impl Default for Ivylace {
                     "Crossover Low",
                     120.0,
                     FloatRange::Skewed {
-                        min: 20.0,
+                        min: 30.0,
                         max: 500.0,
                         factor: FloatRange::skew_factor(-1.5),
                     },
@@ -507,6 +512,7 @@ impl Plugin for Ivylace {
         let input_gain_db = self.params.input_gain.smoothed.next();
         let output_gain_db = self.params.output_gain.smoothed.next();
         let dry_wet = self.params.dry_wet.smoothed.next();
+        let delta_monitor = self.params.delta_monitor.load(std::sync::atomic::Ordering::Relaxed);
 
         let input_gain = 10.0_f64.powf(input_gain_db as f64 / 20.0);
         let output_gain = 10.0_f64.powf(output_gain_db as f64 / 20.0);
@@ -555,16 +561,14 @@ impl Plugin for Ivylace {
             // Split into 4 bands
             let (bands_l, bands_r) = self.crossover.process(left_in, right_in);
 
-            // Dry signal = crossover-split sum (before comp/sat).
-            // Using the band sum ensures the dry path shares the same phase
-            // characteristics as the wet path, preventing phase cancellation
-            // artifacts at intermediate dry/wet mix values.
-            let dry_l: f64 = bands_l.iter().sum();
-            let dry_r: f64 = bands_r.iter().sum();
-
-            // Process each band through oversampled compressor + saturation
+            // Process each band through oversampled compressor + saturation.
+            // The oversampler returns both wet (comp+sat) and dry (identity)
+            // outputs that share the same FIR latency, enabling phase-coherent
+            // dry/wet mixing at any oversampling factor.
             let mut out_l = 0.0f64;
             let mut out_r = 0.0f64;
+            let mut dry_l = 0.0f64;
+            let mut dry_r = 0.0f64;
             // Accumulators for spectrum pre/post inside the oversampled domain.
             // Both go through the same FIR up/down path, so the delta only
             // shows comp+sat effects without oversampler rolloff artifacts.
@@ -588,7 +592,7 @@ impl Plugin for Ivylace {
                 let mut band_post_sum = 0.0f64;
                 let mut band_os_count = 0u32;
 
-                let (proc_l, proc_r) = os_bands[i].process(
+                let (proc_l, proc_r, band_dry_l, band_dry_r) = os_bands[i].process(
                     bands_l[i],
                     bands_r[i],
                     |l, r| {
@@ -624,12 +628,23 @@ impl Plugin for Ivylace {
                 if should_output {
                     out_l += proc_l;
                     out_r += proc_r;
+                    dry_l += band_dry_l;
+                    dry_r += band_dry_r;
                 }
             }
 
-            // Dry/wet mix
-            let final_l = dry_l * (1.0 - dry_wet as f64) + out_l * dry_wet as f64;
-            let final_r = dry_r * (1.0 - dry_wet as f64) + out_r * dry_wet as f64;
+            // Delta monitor or normal dry/wet mix
+            let (final_l, final_r) = if delta_monitor {
+                // Delta mode: output = wet − dry (what the processing is doing)
+                // Both wet and dry share the same FIR latency, so the delta
+                // cleanly isolates compressor + saturation artifacts.
+                (out_l - dry_l, out_r - dry_r)
+            } else {
+                // Normal dry/wet mix (both dry and wet share the same FIR latency)
+                let mix = dry_wet as f64;
+                (dry_l * (1.0 - mix) + out_l * mix,
+                 dry_r * (1.0 - mix) + out_r * mix)
+            };
 
             // Output gain
             let out_sample_l = (final_l * output_gain) as f32;
