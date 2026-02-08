@@ -2,6 +2,7 @@
 /// Log-scale frequency axis, band color fills, grid lines.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
@@ -46,6 +47,8 @@ pub struct CrossoverDisplay {
     /// Handle index for a pending reset gesture (double-click).
     /// begin_set + set_value happen on MouseDoubleClick, end_set on MouseUp.
     reset_handle: Option<usize>,
+    /// Cached femtovg font ID (lazy-loaded on first draw)
+    font_id: Cell<Option<vg::FontId>>,
 }
 
 impl CrossoverDisplay {
@@ -62,6 +65,7 @@ impl CrossoverDisplay {
             drag_handle: None,
             hover_handle: None,
             reset_handle: None,
+            font_id: Cell::new(None),
         }
         .build(cx, |_| {})
         .height(Pixels(DISPLAY_HEIGHT))
@@ -107,6 +111,18 @@ impl View for CrossoverDisplay {
         let by = bounds.y;
         let bw = bounds.w;
         let bh = bounds.h;
+
+        // Lazy-load font for femtovg text rendering
+        let font = match self.font_id.get() {
+            Some(id) => Some(id),
+            None => {
+                let id = canvas.add_font_mem(nih_plug_vizia::assets::fonts::NOTO_SANS_REGULAR).ok();
+                if let Some(id) = id {
+                    self.font_id.set(Some(id));
+                }
+                id
+            }
+        };
 
         let freqs = self.get_handle_freqs();
         let xover_positions = [
@@ -165,6 +181,7 @@ impl View for CrossoverDisplay {
                 text_paint.set_font_size(7.0 * dpi);
                 text_paint.set_text_align(vg::Align::Center);
                 text_paint.set_text_baseline(vg::Baseline::Bottom);
+                if let Some(f) = font { text_paint.set_font(&[f]); }
                 let _ = canvas.fill_text(gx, by + bh - 2.0, &label, &text_paint);
             }
         }
@@ -188,6 +205,7 @@ impl View for CrossoverDisplay {
                 paint.set_font_size(10.0 * dpi);
                 paint.set_text_align(vg::Align::Center);
                 paint.set_text_baseline(vg::Baseline::Top);
+                if let Some(f) = font { paint.set_font(&[f]); }
                 let _ = canvas.fill_text(center_x, by + 8.0, theme::BAND_NAMES[i], &paint);
             }
         }
@@ -244,6 +262,7 @@ impl View for CrossoverDisplay {
                     text_paint.set_font_size(9.0 * dpi);
                     text_paint.set_text_align(vg::Align::Center);
                     text_paint.set_text_baseline(vg::Baseline::Middle);
+                    if let Some(f) = font { text_paint.set_font(&[f]); }
                     let _ = canvas.fill_text(bx + hx, by + 20.0 + label_h * 0.5, &label, &text_paint);
                 }
             }

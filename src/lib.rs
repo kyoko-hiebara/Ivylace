@@ -31,8 +31,10 @@ struct Ivylace {
     oversampler: MultibandOversampler,
     gr_meters: [GrMeter; NUM_BANDS],
     gr_meter_outputs: Arc<GrMeterOutputs>,
-    /// Spectrum buffer for lock-free audio→GUI FFT data
-    spectrum_buffer: Arc<SpectrumBuffer>,
+    /// Spectrum buffer (pre-processing) for lock-free audio→GUI FFT data
+    spectrum_pre: Arc<SpectrumBuffer>,
+    /// Spectrum buffer (post-processing) for lock-free audio→GUI FFT data
+    spectrum_post: Arc<SpectrumBuffer>,
     /// Current sample rate (for spectrum display)
     current_sample_rate: f32,
     /// Sample counter for throttled GR meter output updates
@@ -385,7 +387,8 @@ impl Default for Ivylace {
                 GrMeter::new(44100.0),
             ],
             gr_meter_outputs: Arc::new(GrMeterOutputs::new()),
-            spectrum_buffer: Arc::new(SpectrumBuffer::new()),
+            spectrum_pre: Arc::new(SpectrumBuffer::new()),
+            spectrum_post: Arc::new(SpectrumBuffer::new()),
             current_sample_rate: 44100.0,
             gr_update_counter: 0,
             is_rendering: false,
@@ -426,7 +429,8 @@ impl Plugin for Ivylace {
         editor::create(
             self.params.clone(),
             self.gr_meter_outputs.clone(),
-            self.spectrum_buffer.clone(),
+            self.spectrum_pre.clone(),
+            self.spectrum_post.clone(),
             self.current_sample_rate,
             self.params.editor_state.clone(),
         )
@@ -532,6 +536,11 @@ impl Plugin for Ivylace {
             let dry_l = left_in;
             let dry_r = right_in;
 
+            // Feed pre-processing spectrum buffer (mono sum, only when GUI is open)
+            if self.params.editor_state.is_open() {
+                self.spectrum_pre.push((left_in as f32 + right_in as f32) * 0.5);
+            }
+
             // Split into 4 bands
             let (bands_l, bands_r) = self.crossover.process(left_in, right_in);
 
@@ -585,9 +594,9 @@ impl Plugin for Ivylace {
             *channel_samples.get_mut(0).unwrap() = out_sample_l;
             *channel_samples.get_mut(1).unwrap() = out_sample_r;
 
-            // Feed spectrum buffer (mono sum, only when GUI is open)
+            // Feed post-processing spectrum buffer (mono sum, only when GUI is open)
             if self.params.editor_state.is_open() {
-                self.spectrum_buffer.push((out_sample_l + out_sample_r) * 0.5);
+                self.spectrum_post.push((out_sample_l + out_sample_r) * 0.5);
             }
 
             // Update GR meter outputs at reduced rate

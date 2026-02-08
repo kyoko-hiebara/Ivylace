@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
-use nih_plug_vizia::widgets::ResizeHandle;
 use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
 
 use crate::dsp::gr_meter::GrMeterOutputs;
@@ -35,14 +34,15 @@ impl Model for Data {}
 // ── Editor entry points ──────────────────────────────────────
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
-    ViziaState::new(|| (960, 740))
+    ViziaState::new(|| (960, 820))
 }
 
 pub(crate) fn create(
     params: Arc<IvylaceParams>,
     gr_outputs: Arc<GrMeterOutputs>,
-    _spectrum_buf: Arc<SpectrumBuffer>,
-    _sample_rate: f32,
+    spectrum_pre: Arc<SpectrumBuffer>,
+    spectrum_post: Arc<SpectrumBuffer>,
+    sample_rate: f32,
     editor_state: Arc<ViziaState>,
 ) -> Option<Box<dyn Editor>> {
     create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _gui_context| {
@@ -73,6 +73,13 @@ pub(crate) fn create(
             build_title_bar(cx, about_visible.clone());
             header::Header::new(cx, glass_mode.clone());
             crossover::CrossoverDisplay::new(cx, glass_mode.clone());
+            spectrum::SpectrumAnalyzer::new(
+                cx,
+                spectrum_pre.clone(),
+                spectrum_post.clone(),
+                sample_rate,
+                glass_mode.clone(),
+            );
 
             HStack::new(cx, |cx| {
                 let p = Data::params.get(cx);
@@ -88,8 +95,6 @@ pub(crate) fn create(
         })
         .width(Stretch(1.0))
         .height(Stretch(1.0));
-
-        ResizeHandle::new(cx);
     })
 }
 

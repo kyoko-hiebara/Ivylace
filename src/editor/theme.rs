@@ -419,6 +419,58 @@ pub fn spectrum_top_border(mode: ThemeMode) -> vg::Color {
     }
 }
 
+// ── Spectrum delta (cut / boost) ────────────────────────────
+
+/// Delta cut fill (gain reduction, below 0dB line) — top of gradient
+pub fn spectrum_delta_cut_top(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(100, 160, 255, 50),   // blue tint
+        ThemeMode::Glass => vg::Color::rgba(40, 120, 200, 55),
+    }
+}
+/// Delta cut fill — bottom of gradient
+pub fn spectrum_delta_cut_bottom(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(100, 160, 255, 10),
+        ThemeMode::Glass => vg::Color::rgba(40, 120, 200, 10),
+    }
+}
+/// Delta cut stroke
+pub fn spectrum_delta_cut_stroke(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(120, 180, 255, 140),
+        ThemeMode::Glass => vg::Color::rgba(40, 120, 200, 150),
+    }
+}
+/// Delta boost fill (makeup gain, above 0dB line) — top of gradient
+pub fn spectrum_delta_boost_top(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(255, 130, 80, 50),    // orange tint
+        ThemeMode::Glass => vg::Color::rgba(220, 100, 50, 55),
+    }
+}
+/// Delta boost fill — bottom of gradient
+pub fn spectrum_delta_boost_bottom(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(255, 130, 80, 10),
+        ThemeMode::Glass => vg::Color::rgba(220, 100, 50, 10),
+    }
+}
+/// Delta boost stroke
+pub fn spectrum_delta_boost_stroke(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(255, 150, 100, 140),
+        ThemeMode::Glass => vg::Color::rgba(220, 100, 50, 150),
+    }
+}
+/// 0dB reference line
+pub fn spectrum_zero_line(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(255, 255, 255, 30),
+        ThemeMode::Glass => vg::Color::rgba(40, 50, 70, 35),
+    }
+}
+
 // ── About dialog ────────────────────────────────────────────
 
 pub fn about_overlay_bg(mode: ThemeMode) -> vg::Color {

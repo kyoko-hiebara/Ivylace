@@ -1,13 +1,13 @@
 /// Spectrum analyzer buffer for lock-free audio→GUI FFT data sharing.
 ///
 /// Triple-buffer pattern: audio thread writes to one buffer, GUI reads another.
-/// In-crate radix-2 Cooley-Tukey FFT (2048-point, f32).
+/// In-crate radix-2 Cooley-Tukey FFT (4096-point, f32).
 /// No heap allocations on the audio thread path.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// FFT size (must be power of 2)
-pub const FFT_SIZE: usize = 2048;
+pub const FFT_SIZE: usize = 8192;
 /// Number of magnitude bins the GUI reads
 pub const NUM_BINS: usize = FFT_SIZE / 2;
 
