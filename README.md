@@ -45,8 +45,9 @@ Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (Rust).
 - **Delta spectrum analyzer** — real-time pre/post difference display (cut=blue, boost=orange), ±6dB range
 - **Delta monitor** — audition wet−dry difference via header toggle
 - **About dialog** — click title bar to view logo, version, and author info (theme-dependent logo)
+- **Walking pets** — chick and cat stroll across the bottom of band strips (cosmetic easter egg)
 - **DAW bypass support** — VST3 bypass button (Cubase, etc.)
-- **Resizable window** (960 x 820 default)
+- **Resizable window** (960 x 860 default)
 
 ### Band Layout
 | Band | Range | Default Saturation |
@@ -97,7 +98,8 @@ src/
 │   ├── band_strip.rs       # Per-band strip layout
 │   ├── header.rs           # Global controls bar + theme toggle + delta monitor
 │   ├── spectrum.rs         # Delta spectrum analyzer (pre/post difference display)
-│   └── about.rs            # About dialog overlay (theme-dependent logo)
+│   ├── about.rs            # About dialog overlay (theme-dependent logo)
+│   └── pets.rs             # Walking pets easter egg (chick + cat, femtovg paths)
 ├── dsp/
 │   ├── mod.rs
 │   ├── crossover.rs        # LR4 4-band crossover

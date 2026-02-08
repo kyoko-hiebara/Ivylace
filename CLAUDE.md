@@ -43,7 +43,8 @@ ivylace/
     │   ├── band_strip.rs   # BandStrip: per-band control strip
     │   ├── header.rs       # Header: global controls bar + ThemeToggle
     │   ├── spectrum.rs     # SpectrumAnalyzer: delta spectrum display (pre/post difference, cut=blue/boost=orange)
-    │   └── about.rs        # AboutDialog: overlay with theme-dependent logo, version, author, GitHub link
+    │   ├── about.rs        # AboutDialog: overlay with theme-dependent logo, version, author, GitHub link
+    │   └── pets.rs         # WalkingPets: cosmetic easter egg (chick + cat, femtovg paths)
     └── dsp/
         ├── mod.rs          # Module declarations
         ├── crossover.rs    # 4-band LR4 (24dB/oct) Linkwitz-Riley crossover
@@ -203,7 +204,7 @@ GitHub Actions (`.github/workflows/build.yml`):
 - Linux は対象外
 - タグ `v*` プッシュで GitHub Release (draft) 自動作成
 
-## Current State (v0.5.3)
+## Current State (v0.5.4)
 
 ### Implemented
 - 4-band LR4 crossover with adjustable frequencies
@@ -240,6 +241,8 @@ GitHub Actions (`.github/workflows/build.yml`):
 - **Display range 30Hz+** (v0.5.2): spectrum/crossover display and crossover slider start at 30Hz to avoid sub-bass visual artifacts
 - **Analog needle GR meter** (v0.5.3): semicircular VU-style gauge per band alongside digital bar meter
 - **VU-like meter ballistics** (v0.5.3): smoother attack (10ms) and slower release (600ms) for readable metering
+- **Walking pets easter egg** (v0.5.4): chick and cat walk across the bottom of band strips, drawn with femtovg paths for cross-platform compatibility
+- **Window height 860px** (v0.5.4): increased from 820 to accommodate analog meters and pets
 
 ### TODO
 

@@ -20,6 +20,7 @@ mod band_strip;
 mod header;
 mod spectrum;
 mod about;
+mod pets;
 
 // ── Data Model (shared between audio and GUI via lenses) ─────
 
@@ -34,7 +35,7 @@ impl Model for Data {}
 // ── Editor entry points ──────────────────────────────────────
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
-    ViziaState::new(|| (960, 820))
+    ViziaState::new(|| (960, 860))
 }
 
 pub(crate) fn create(
@@ -89,6 +90,9 @@ pub(crate) fn create(
             })
             .height(Stretch(1.0))
             .width(Stretch(1.0));
+
+            // Walking pets (cosmetic easter egg)
+            pets::WalkingPets::new(cx, glass_mode.clone());
 
             // About dialog overlay (rendered last → on top of everything)
             about::AboutDialog::new(cx, about_visible.clone(), glass_mode.clone());
