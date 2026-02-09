@@ -4,7 +4,7 @@ members = ["xtask"]
 
 [package]
 name = "ivylace"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 authors = ["きょーこ"]
 description = "Multiband glue compressor with per-band analog saturation"

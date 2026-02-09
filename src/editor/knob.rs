@@ -3,7 +3,7 @@
 /// Optional threshold linking: when `link_params` is set, dragging propagates
 /// delta changes to other linked bands' thresholds.
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
@@ -14,12 +14,26 @@ use nih_plug_vizia::widgets::RawParamEvent;
 
 use super::theme::{self, ThemeMode};
 use super::Data;
-use crate::{IvylaceParams, SlotStorage};
+use crate::{GlobalOverrides, IvylaceParams, SlotStorage};
 
 fn mode_lens() -> impl Lens<Target = ThemeMode> {
     Data::params.map(|p| {
         if p.glass_mode.load(Ordering::Relaxed) { ThemeMode::Glass } else { ThemeMode::Dark }
     })
+}
+
+/// Sentinel value for `pending_display`: indicates no pending override.
+/// Uses `f32::NAN` bits which can never be a valid normalized value.
+const PENDING_NONE: u32 = f32::NAN.to_bits();
+
+/// Identifies which global override field a non-slot knob writes to.
+/// Used for immediate GUI→audio value bypass (VST3 deferred edit workaround).
+#[derive(Clone, Copy)]
+pub(crate) enum GlobalOverrideKind {
+    InputGainDb,
+    OutputGainDb,
+    DryWet,
+    DriveDb(usize), // band index
 }
 
 /// Describes which slot field a knob should read for display override.
@@ -48,6 +62,19 @@ impl SlotValueSource {
             SlotParamKind::ThresholdDb => slot.threshold_normalized(self.band_idx),
             SlotParamKind::MakeupDb => slot.makeup_normalized(self.band_idx),
             SlotParamKind::ScHpfHz => slot.sc_hpf_normalized(self.band_idx),
+        }
+    }
+
+    /// Write a plain value directly to the active slot's atomic.
+    /// This enables immediate display update even when the host defers the
+    /// parameter change (VST3 deferred edit during audio processing).
+    #[inline]
+    fn store_plain(&self, plain: f32) {
+        let slot = if self.is_b.load(Ordering::Relaxed) { &self.slot_b } else { &self.slot_a };
+        match self.kind {
+            SlotParamKind::ThresholdDb => slot.threshold_db[self.band_idx].store(plain),
+            SlotParamKind::MakeupDb => slot.makeup_db[self.band_idx].store(plain),
+            SlotParamKind::ScHpfHz => slot.sc_hpf_hz[self.band_idx].store(plain),
         }
     }
 
@@ -129,6 +156,22 @@ pub struct GlassKnob {
 
     /// Optional A/B slot value source for display override
     slot_value: Option<SlotValueSource>,
+
+    /// Whether the value label is in text editing mode (double-click to enter).
+    /// Arc<AtomicBool> so child Labels can read it via lens and hide themselves.
+    editing: Arc<AtomicBool>,
+    /// Buffer for typed text during editing
+    edit_buffer: String,
+
+    /// Pending normalized value for display override (non-slot knobs only).
+    /// Stores f32 bits in AtomicU32. Set after keyboard/drag/scroll edits to
+    /// ensure immediate display update even when VST3 defers the parameter change.
+    /// PENDING_NONE sentinel means "use param's internal value".
+    pending_display: Arc<AtomicU32>,
+
+    /// Optional global override for immediate audio-thread value bypass.
+    /// Non-slot knobs set this so process() picks up the plain value instantly.
+    global_override: Option<(Arc<GlobalOverrides>, GlobalOverrideKind)>,
 }
 
 impl GlassKnob {
@@ -140,6 +183,7 @@ impl GlassKnob {
         color: vg::Color,
         label: &str,
         glass_mode: Arc<AtomicBool>,
+        global_override: Option<(Arc<GlobalOverrides>, GlobalOverrideKind)>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone,
@@ -147,7 +191,7 @@ impl GlassKnob {
         P: Param + 'static,
         FMap: Fn(&Params) -> &P + Copy + 'static,
     {
-        Self::new_full(cx, params, params_to_param, size, color, label, glass_mode, None, 0, None)
+        Self::new_full(cx, params, params_to_param, size, color, label, glass_mode, None, 0, None, global_override)
     }
 
     /// Full constructor with all options (link support + slot value source).
@@ -162,6 +206,7 @@ impl GlassKnob {
         link_params: Option<Arc<IvylaceParams>>,
         band_idx: usize,
         slot_value: Option<SlotValueSource>,
+        global_override: Option<(Arc<GlobalOverrides>, GlobalOverrideKind)>,
     ) -> Handle<'a, Self>
     where
         L: Lens<Target = Params> + Clone,
@@ -177,6 +222,11 @@ impl GlassKnob {
                 (sv.slot_a.clone(), sv.slot_b.clone(), sv.is_b.clone(), sv.kind, sv.band_idx)
             });
 
+        let editing = Arc::new(AtomicBool::new(false));
+        let editing_for_labels = editing.clone();
+        let pending_display = Arc::new(AtomicU32::new(PENDING_NONE));
+        let pending_display_for_labels = pending_display.clone();
+
         Self {
             param_base,
             size,
@@ -190,9 +240,13 @@ impl GlassKnob {
             my_start_value: 0.0,
             linked_drag: None,
             slot_value,
+            editing,
+            edit_buffer: String::new(),
+            pending_display,
+            global_override,
         }
         .build(cx, |cx| {
-            Self::build_labels(cx, params, params_to_param, size, label, slot_value_for_label);
+            Self::build_labels(cx, params, params_to_param, size, label, slot_value_for_label, editing_for_labels, pending_display_for_labels);
         })
         .width(Pixels(size.outer().max(50.0)))
         .height(Auto)
@@ -201,6 +255,7 @@ impl GlassKnob {
     /// Shared label building logic for both constructors.
     /// `slot_info` is an optional tuple of (slot_a, slot_b, is_b, kind, band_idx)
     /// used to read the display value from the active A/B slot instead of nih-plug params.
+    /// `editing` flag is used to hide labels during text input mode.
     fn build_labels<L, Params, P, FMap>(
         cx: &mut Context,
         params: L,
@@ -208,12 +263,19 @@ impl GlassKnob {
         size: KnobSize,
         label: &str,
         slot_info: Option<(Arc<SlotStorage>, Arc<SlotStorage>, Arc<AtomicBool>, SlotParamKind, usize)>,
+        editing: Arc<AtomicBool>,
+        pending_display: Arc<AtomicU32>,
     ) where
         L: Lens<Target = Params> + Clone,
         Params: 'static,
         P: Param + 'static,
         FMap: Fn(&Params) -> &P + Copy + 'static,
     {
+        // Lens to hide labels while editing.
+        // Use Visibility::Hidden (not Display::None) to preserve layout space.
+        let editing_for_name = editing.clone();
+        let editing_for_value = editing;
+
         VStack::new(cx, |cx| {
             // Spacer element for the knob drawing area (drawn by View::draw)
             Element::new(cx)
@@ -234,11 +296,17 @@ impl GlassKnob {
                 .text_align(TextAlign::Center)
                 .width(Stretch(1.0))
                 .height(Pixels(13.0))
-                .hoverable(false);
+                .hoverable(false)
+                .visibility(Data::params.map(move |_| {
+                    if editing_for_name.load(Ordering::Relaxed) { Visibility::Hidden } else { Visibility::Visible }
+                }));
 
             // Value display below the label (e.g., "-20.0 dB")
-            // When slot_info is provided, read from the active slot atomics
-            // instead of nih-plug's internal param value (which may not update during processing).
+            // Priority:
+            //   1. slot_info → read from active slot atomics (slot knobs)
+            //   2. pending_display → read from per-knob atomic (non-slot knobs, set on keyboard/drag edit)
+            //   3. param.unmodulated_normalized_value() → nih-plug internal (fallback)
+            let pending_for_lens = pending_display;
             let display_lens = ParamWidgetBase::make_lens(
                 params.clone(),
                 params_to_param,
@@ -254,7 +322,14 @@ impl GlassKnob {
                             param.normalized_value_to_string(normalized, true)
                         }
                         None => {
-                            param.normalized_value_to_string(param.unmodulated_normalized_value(), true)
+                            // Check pending_display for non-slot knobs
+                            let pending_bits = pending_for_lens.load(Ordering::Relaxed);
+                            let normalized = if pending_bits != PENDING_NONE {
+                                f32::from_bits(pending_bits)
+                            } else {
+                                param.unmodulated_normalized_value()
+                            };
+                            param.normalized_value_to_string(normalized, true)
                         }
                     }
                 },
@@ -269,7 +344,10 @@ impl GlassKnob {
                 .text_align(TextAlign::Center)
                 .width(Stretch(1.0))
                 .height(Pixels(14.0))
-                .hoverable(false);
+                .hoverable(false)
+                .visibility(Data::params.map(move |_| {
+                    if editing_for_value.load(Ordering::Relaxed) { Visibility::Hidden } else { Visibility::Visible }
+                }));
         })
         .row_between(Pixels(2.0))
         .width(Stretch(1.0))
@@ -277,12 +355,56 @@ impl GlassKnob {
     }
 
     /// Get the effective normalized value for this knob.
-    /// Reads from slot atomics when available (A/B mode), otherwise from nih-plug param.
+    /// Priority: slot atomics > pending_display > nih-plug param internal value.
     #[inline]
     fn effective_normalized(&self) -> f32 {
         match &self.slot_value {
             Some(sv) => sv.normalized(),
-            None => self.param_base.unmodulated_normalized_value(),
+            None => {
+                let pending_bits = self.pending_display.load(Ordering::Relaxed);
+                if pending_bits != PENDING_NONE {
+                    f32::from_bits(pending_bits)
+                } else {
+                    self.param_base.unmodulated_normalized_value()
+                }
+            }
+        }
+    }
+
+    /// Write a plain value to the global override for immediate audio-thread pickup.
+    /// Also updates `pending_display` for immediate GUI display.
+    #[inline]
+    fn apply_override(&self, normalized: f32) {
+        // Always update pending_display for GUI
+        if self.slot_value.is_none() {
+            self.pending_display.store(normalized.to_bits(), Ordering::Relaxed);
+        }
+        // Write to audio-thread override
+        if let Some((ovr, kind)) = &self.global_override {
+            let plain = self.param_base.preview_plain(normalized);
+            match kind {
+                GlobalOverrideKind::InputGainDb => ovr.input_gain_db.store(plain),
+                GlobalOverrideKind::OutputGainDb => ovr.output_gain_db.store(plain),
+                GlobalOverrideKind::DryWet => ovr.dry_wet.store(plain),
+                GlobalOverrideKind::DriveDb(band) => ovr.drive_db[*band].store(plain),
+            }
+        }
+    }
+
+    /// Clear global override (revert to nih-plug smoothed value on audio thread).
+    #[inline]
+    fn clear_override(&self) {
+        if let Some((ovr, kind)) = &self.global_override {
+            match kind {
+                GlobalOverrideKind::InputGainDb => ovr.clear_input_gain(),
+                GlobalOverrideKind::OutputGainDb => ovr.clear_output_gain(),
+                GlobalOverrideKind::DryWet => ovr.clear_dry_wet(),
+                GlobalOverrideKind::DriveDb(band) => ovr.clear_drive(*band),
+            }
+        }
+        // Also clear pending display
+        if self.slot_value.is_none() {
+            self.pending_display.store(PENDING_NONE, Ordering::Relaxed);
         }
     }
 
@@ -381,10 +503,7 @@ impl View for GlassKnob {
         let cx_x = bounds.x + bounds.w * 0.5;
         let cy_y = bounds.y + outer * 0.5;
 
-        let normalized = match &self.slot_value {
-            Some(sv) => sv.normalized(),
-            None => self.param_base.unmodulated_normalized_value(),
-        };
+        let normalized = self.effective_normalized();
         let pct = normalized.clamp(0.0, 1.0);
 
         // Arc geometry: 270° sweep from -135° to +135°
@@ -472,11 +591,161 @@ impl View for GlassKnob {
         }
 
         // Label and value are rendered as VIZIA child Labels (see build_labels())
+
+        // ── Inline text editing overlay ──
+        // Labels are hidden via Display::None (driven by editing AtomicBool lens).
+        // Draw the text input box in their place below the knob.
+        if self.editing.load(Ordering::Relaxed) {
+            // Input box: centered below the knob circle, same area as the hidden labels
+            let edit_w = bounds.w.max(56.0 * dpi);
+            let edit_h = 20.0 * dpi;
+            let edit_x = bounds.x + (bounds.w - edit_w) * 0.5;
+            // Position: vertically center in the label area below knob
+            // Label area starts at bounds.y + outer, total height ~31px
+            let label_area_h = 31.0 * dpi;
+            let edit_y = bounds.y + outer + (label_area_h - edit_h) * 0.5;
+
+            // Background: glass panel style
+            let mut bg_path = vg::Path::new();
+            bg_path.rounded_rect(edit_x, edit_y, edit_w, edit_h, 3.0 * dpi);
+            let bg_color = match mode {
+                ThemeMode::Dark => vg::Color::rgba(80, 65, 130, 200),  // semi-opaque purple
+                ThemeMode::Glass => vg::Color::rgba(220, 235, 250, 220), // semi-opaque light blue
+            };
+            canvas.fill_path(&bg_path, &vg::Paint::color(bg_color));
+
+            // Accent border using the knob's color
+            let mut bp = vg::Paint::color(self.color);
+            bp.set_line_width(1.5 * dpi);
+            canvas.stroke_path(&bg_path, &bp);
+
+            // Text content — centered in the box
+            let font = canvas.add_font_mem(nih_plug_vizia::assets::fonts::NOTO_SANS_REGULAR).ok();
+            if let Some(font) = font {
+                if self.edit_buffer.is_empty() {
+                    // Placeholder: show current value dimmed + cursor
+                    let placeholder = format!(
+                        "{}|",
+                        self.param_base.normalized_value_to_string(self.effective_normalized(), false)
+                    );
+                    let mut paint = vg::Paint::color(theme::with_alpha(theme::text_primary(mode), 0.35));
+                    paint.set_font_size(11.0 * dpi);
+                    paint.set_text_align(vg::Align::Center);
+                    paint.set_text_baseline(vg::Baseline::Middle);
+                    paint.set_font(&[font]);
+                    let _ = canvas.fill_text(
+                        edit_x + edit_w * 0.5,
+                        edit_y + edit_h * 0.5,
+                        &placeholder,
+                        &paint,
+                    );
+                } else {
+                    // Active input: typed text + cursor
+                    let display = format!("{}|", self.edit_buffer);
+                    let mut paint = vg::Paint::color(theme::text_primary(mode));
+                    paint.set_font_size(11.0 * dpi);
+                    paint.set_text_align(vg::Align::Center);
+                    paint.set_text_baseline(vg::Baseline::Middle);
+                    paint.set_font(&[font]);
+                    let _ = canvas.fill_text(
+                        edit_x + edit_w * 0.5,
+                        edit_y + edit_h * 0.5,
+                        &display,
+                        &paint,
+                    );
+                }
+            }
+        }
     }
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
         event.map(|window_event, meta| match window_event {
+            // ── Keyboard: text editing ──
+            WindowEvent::CharInput(c) => {
+                if self.editing.load(Ordering::Relaxed) {
+                    // Accept numeric characters relevant to param values
+                    if c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '%' || *c == ' ' {
+                        self.edit_buffer.push(*c);
+                        cx.needs_redraw();
+                    }
+                    meta.consume();
+                }
+            }
+            WindowEvent::KeyDown(code, _) => {
+                if self.editing.load(Ordering::Relaxed) {
+                    match code {
+                        Code::Enter | Code::NumpadEnter => {
+                            // Try to parse and apply the value
+                            let parsed = self.param_base.string_to_normalized_value(&self.edit_buffer);
+                            if let Some(normalized) = parsed {
+                                self.param_base.begin_set_parameter(cx);
+                                self.param_base.set_normalized_value(cx, normalized);
+                                self.param_base.end_set_parameter(cx);
+                                // Immediate display + audio override
+                                if let Some(sv) = &self.slot_value {
+                                    let plain = self.param_base.preview_plain(normalized);
+                                    sv.store_plain(plain);
+                                }
+                                self.apply_override(normalized);
+                            }
+                            self.editing.store(false, Ordering::Relaxed);
+                            self.edit_buffer.clear();
+                            cx.release();
+                            cx.set_active(false);
+                            cx.needs_redraw();
+                            meta.consume();
+                        }
+                        Code::Escape => {
+                            // Cancel editing without changing value
+                            self.editing.store(false, Ordering::Relaxed);
+                            self.edit_buffer.clear();
+                            cx.release();
+                            cx.set_active(false);
+                            cx.needs_redraw();
+                            meta.consume();
+                        }
+                        Code::Backspace => {
+                            self.edit_buffer.pop();
+                            cx.needs_redraw();
+                            meta.consume();
+                        }
+                        _ => { meta.consume(); }
+                    }
+                }
+            }
+            WindowEvent::FocusOut => {
+                if self.editing.load(Ordering::Relaxed) {
+                    // Lost focus: cancel editing
+                    self.editing.store(false, Ordering::Relaxed);
+                    self.edit_buffer.clear();
+                    cx.needs_redraw();
+                }
+            }
+
+            // ── Mouse interactions ──
             WindowEvent::MouseDown(MouseButton::Left) => {
+                if self.editing.load(Ordering::Relaxed) {
+                    // Click while editing: confirm the edit first
+                    if let Some(normalized) = self.param_base.string_to_normalized_value(&self.edit_buffer) {
+                        self.param_base.begin_set_parameter(cx);
+                        self.param_base.set_normalized_value(cx, normalized);
+                        self.param_base.end_set_parameter(cx);
+                        // Immediate display + audio override
+                        if let Some(sv) = &self.slot_value {
+                            let plain = self.param_base.preview_plain(normalized);
+                            sv.store_plain(plain);
+                        }
+                        self.apply_override(normalized);
+                    }
+                    self.editing.store(false, Ordering::Relaxed);
+                    self.edit_buffer.clear();
+                    cx.release();
+                    cx.set_active(false);
+                    cx.needs_redraw();
+                    meta.consume();
+                    return;
+                }
+
                 if cx.modifiers().alt() || cx.modifiers().command() {
                     // Alt/Cmd+Click: reset to default
                     // Split gesture: begin+set on MouseDown, end on MouseUp
@@ -486,6 +755,7 @@ impl View for GlassKnob {
                     self.param_base.begin_set_parameter(cx);
                     self.param_base.set_normalized_value(cx, default);
                     self.reset_gesture_active = true;
+                    self.apply_override(default);
 
                     // Link: propagate delta to linked bands
                     self.my_start_value = current;
@@ -517,30 +787,35 @@ impl View for GlassKnob {
                 meta.consume();
             }
             WindowEvent::MouseDoubleClick(MouseButton::Left) => {
-                // Double-click: reset to default
-                let current = self.effective_normalized();
-                let default = self.param_base.default_normalized_value();
-
+                // Double-click: enter text editing mode
                 // If a drag gesture is already active from the preceding MouseDown,
-                // end it first before starting the reset gesture
+                // end it first
                 if self.drag_active {
                     self.param_base.end_set_parameter(cx);
                     self.end_linked(cx);
                     self.drag_active = false;
                 }
-                self.param_base.begin_set_parameter(cx);
-                self.param_base.set_normalized_value(cx, default);
-                self.reset_gesture_active = true;
+                if self.reset_gesture_active {
+                    self.param_base.end_set_parameter(cx);
+                    self.end_linked(cx);
+                    self.reset_gesture_active = false;
+                }
 
-                // Link: propagate delta reset
-                self.my_start_value = current;
-                self.begin_linked(cx);
-                self.update_linked(cx, default);
-
+                // Start with empty buffer — user types the desired value from scratch
+                // Show placeholder with current value in draw() as hint
+                self.edit_buffer.clear();
+                self.editing.store(true, Ordering::Relaxed);
                 cx.capture();
+                cx.focus();
+                cx.set_active(true);
+                cx.needs_redraw();
                 meta.consume();
             }
             WindowEvent::MouseUp(MouseButton::Left) => {
+                if self.editing.load(Ordering::Relaxed) {
+                    // Don't end editing on mouse up
+                    return;
+                }
                 if self.drag_active {
                     self.drag_active = false;
                     cx.release();
@@ -549,7 +824,7 @@ impl View for GlassKnob {
                     self.end_linked(cx);
                     meta.consume();
                 } else if self.reset_gesture_active {
-                    // End the reset gesture (alt-click or double-click)
+                    // End the reset gesture (alt-click)
                     self.reset_gesture_active = false;
                     cx.release();
                     self.param_base.end_set_parameter(cx);
@@ -558,6 +833,7 @@ impl View for GlassKnob {
                 }
             }
             WindowEvent::MouseMove(_x, y) => {
+                if self.editing.load(Ordering::Relaxed) { return; }
                 if self.drag_active {
                     let sensitivity = if cx.modifiers().shift() { 2000.0 } else { 200.0 };
 
@@ -584,9 +860,11 @@ impl View for GlassKnob {
 
                     self.param_base.set_normalized_value(cx, new_value);
                     self.update_linked(cx, new_value);
+                    self.apply_override(new_value);
                 }
             }
             WindowEvent::KeyUp(_, Some(Key::Shift)) => {
+                if self.editing.load(Ordering::Relaxed) { return; }
                 if self.drag_active && self.granular_drag_status.is_some() {
                     self.granular_drag_status = Some(GranularDragStatus {
                         starting_y: cx.mouse().cursory,
@@ -595,6 +873,7 @@ impl View for GlassKnob {
                 }
             }
             WindowEvent::MouseScroll(_sx, sy) => {
+                if self.editing.load(Ordering::Relaxed) { return; }
                 let use_finer = cx.modifiers().shift();
                 let current = self.effective_normalized();
 
@@ -612,6 +891,7 @@ impl View for GlassKnob {
                 };
                 self.param_base.set_normalized_value(cx, new_val);
                 self.update_linked(cx, new_val);
+                self.apply_override(new_val);
 
                 if !self.drag_active {
                     self.param_base.end_set_parameter(cx);

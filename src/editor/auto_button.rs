@@ -15,7 +15,7 @@
 ///
 /// State machine: Idle → BpmInput → MeasuringGR → Done → Idle
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -36,7 +36,7 @@ const TARGET_GR: f32 = -2.5;
 const MAX_ITERATIONS: u32 = 3;
 /// BPM range
 const BPM_MIN: u32 = 60;
-const BPM_MAX: u32 = 200;
+const BPM_MAX: u32 = 300;
 const BPM_DEFAULT: u32 = 128;
 
 /// Auto-analysis phases
@@ -278,6 +278,10 @@ pub struct AutoOverlay {
     #[allow(dead_code)]
     slot_a: Arc<SlotStorage>,
     slot_b: Arc<SlotStorage>,
+    /// BPM keyboard input mode
+    bpm_editing: Cell<bool>,
+    /// BPM keyboard input buffer
+    bpm_edit_buffer: RefCell<String>,
 }
 
 impl AutoOverlay {
@@ -308,6 +312,8 @@ impl AutoOverlay {
             set_bpm: Cell::new(BPM_DEFAULT),
             slot_a,
             slot_b,
+            bpm_editing: Cell::new(false),
+            bpm_edit_buffer: RefCell::new(String::new()),
         }
         .build(cx, |_| {})
         .position_type(PositionType::SelfDirected)
@@ -520,8 +526,75 @@ impl View for AutoOverlay {
 
         event.map(|window_event, meta| {
             match window_event {
-                WindowEvent::MouseDown(MouseButton::Left) => {
+                // ── Keyboard: BPM direct input ──
+                WindowEvent::CharInput(c) => {
+                    if current == AutoPhase::BpmInput && c.is_ascii_digit() {
+                        if !self.bpm_editing.get() {
+                            self.bpm_editing.set(true);
+                            self.bpm_edit_buffer.borrow_mut().clear();
+                        }
+                        self.bpm_edit_buffer.borrow_mut().push(*c);
+                        cx.needs_redraw();
+                        meta.consume();
+                    }
+                }
+                WindowEvent::KeyDown(code, _) => {
                     if current == AutoPhase::BpmInput {
+                        match code {
+                            Code::Enter | Code::NumpadEnter => {
+                                if self.bpm_editing.get() {
+                                    if let Ok(val) = self.bpm_edit_buffer.borrow().parse::<u32>() {
+                                        self.bpm.set(val.clamp(BPM_MIN, BPM_MAX));
+                                    }
+                                    self.bpm_editing.set(false);
+                                    self.bpm_edit_buffer.borrow_mut().clear();
+                                    cx.needs_redraw();
+                                    meta.consume();
+                                }
+                            }
+                            Code::Escape => {
+                                if self.bpm_editing.get() {
+                                    // Cancel typing
+                                    self.bpm_editing.set(false);
+                                    self.bpm_edit_buffer.borrow_mut().clear();
+                                    cx.needs_redraw();
+                                } else {
+                                    // Cancel entire BPM input
+                                    self.cancel();
+                                    cx.needs_redraw();
+                                }
+                                meta.consume();
+                            }
+                            Code::Backspace => {
+                                if self.bpm_editing.get() {
+                                    self.bpm_edit_buffer.borrow_mut().pop();
+                                    if self.bpm_edit_buffer.borrow().is_empty() {
+                                        self.bpm_editing.set(false);
+                                    }
+                                    cx.needs_redraw();
+                                    meta.consume();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // ── Mouse interactions ──
+                WindowEvent::MouseDown(MouseButton::Left) => {
+                    // Grab focus for keyboard events
+                    cx.focus();
+
+                    if current == AutoPhase::BpmInput {
+                        // If was typing, confirm typed value first
+                        if self.bpm_editing.get() {
+                            if let Ok(val) = self.bpm_edit_buffer.borrow().parse::<u32>() {
+                                self.bpm.set(val.clamp(BPM_MIN, BPM_MAX));
+                            }
+                            self.bpm_editing.set(false);
+                            self.bpm_edit_buffer.borrow_mut().clear();
+                        }
+
                         // Check hit regions
                         let mouse = cx.mouse();
                         let mx = mouse.cursorx;
@@ -561,6 +634,15 @@ impl View for AutoOverlay {
                 }
                 WindowEvent::MouseScroll(_, y) => {
                     if current == AutoPhase::BpmInput {
+                        // If was typing, confirm first
+                        if self.bpm_editing.get() {
+                            if let Ok(val) = self.bpm_edit_buffer.borrow().parse::<u32>() {
+                                self.bpm.set(val.clamp(BPM_MIN, BPM_MAX));
+                            }
+                            self.bpm_editing.set(false);
+                            self.bpm_edit_buffer.borrow_mut().clear();
+                        }
+
                         let bpm = self.bpm.get();
                         if *y > 0.0 {
                             self.bpm.set((bpm + 1).min(BPM_MAX));
@@ -665,7 +747,12 @@ impl AutoOverlay {
 
         // ◀  128  ▶  row
         let bpm = self.bpm.get();
-        let bpm_text = format!("{}", bpm);
+        let bpm_text = if self.bpm_editing.get() {
+            let buf = self.bpm_edit_buffer.borrow();
+            if buf.is_empty() { "_".to_string() } else { format!("{}_", buf) }
+        } else {
+            format!("{}", bpm)
+        };
         let arrow_size = 28.0 * dpi;
         let num_width = 60.0 * dpi;
         let total_w = arrow_size * 2.0 + num_width;
@@ -746,7 +833,7 @@ impl AutoOverlay {
             hp.set_text_align(vg::Align::Center);
             hp.set_text_baseline(vg::Baseline::Top);
             hp.set_font(&[font]);
-            let _ = canvas.fill_text(cx_x, set_y + set_h + 10.0 * dpi, "Scroll to adjust / Click outside to cancel", &hp);
+            let _ = canvas.fill_text(cx_x, set_y + set_h + 10.0 * dpi, "Type / Scroll to adjust \u{00b7} Click outside to cancel", &hp);
         }
 
         // Sub info

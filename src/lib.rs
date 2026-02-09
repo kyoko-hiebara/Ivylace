@@ -12,6 +12,7 @@ use dsp::gr_meter::{AtomicF32, GrMeter, GrMeterOutputs};
 use dsp::oversampling::{MultibandOversampler, OversamplingFactor};
 use dsp::saturation::{MultibandSaturation, SaturationType};
 use dsp::spectrum::SpectrumBuffer;
+use dsp::trim_detect::TrimDetector;
 
 pub(crate) const NUM_BANDS: usize = 4;
 const BAND_NAMES: [&str; NUM_BANDS] = ["Low", "LowMid", "HighMid", "High"];
@@ -250,11 +251,79 @@ impl AutoAnalysisState {
 }
 
 // ============================================================
+//  TRIM State — lock-free audio↔GUI for dry/wet gain matching
+// ============================================================
+
+pub(crate) struct TrimState {
+    /// GUI→Audio: start RMS measurement
+    pub active: AtomicBool,
+    /// Audio→GUI: measurement complete
+    pub done: AtomicBool,
+    /// Progress 0.0..1.0 for GUI animation
+    pub progress: AtomicF32,
+    /// Computed trim gain in dB (audio→GUI display)
+    pub trim_gain_db: AtomicF32,
+}
+
+impl TrimState {
+    pub fn new() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            progress: AtomicF32::new(0.0),
+            trim_gain_db: AtomicF32::new(0.0),
+        }
+    }
+}
+
+// ============================================================
+//  Global parameter overrides — immediate GUI→audio bypass
+// ============================================================
+
+/// Lock-free override storage for non-slot parameters.
+/// When the GUI sets a value via keyboard input, the host may defer the
+/// parameter change (VST3 `is_processing`). These atomics let the audio
+/// thread pick up the new value immediately. NAN sentinel = "no override,
+/// use nih-plug smoothed value".
+pub(crate) struct GlobalOverrides {
+    pub input_gain_db: AtomicF32,
+    pub output_gain_db: AtomicF32,
+    pub dry_wet: AtomicF32,
+    pub drive_db: [AtomicF32; NUM_BANDS],
+}
+
+impl GlobalOverrides {
+    fn new() -> Self {
+        Self {
+            input_gain_db: AtomicF32::new(f32::NAN),
+            output_gain_db: AtomicF32::new(f32::NAN),
+            dry_wet: AtomicF32::new(f32::NAN),
+            drive_db: [
+                AtomicF32::new(f32::NAN), AtomicF32::new(f32::NAN),
+                AtomicF32::new(f32::NAN), AtomicF32::new(f32::NAN),
+            ],
+        }
+    }
+
+    /// Clear an override (revert to nih-plug smoothed value).
+    #[inline]
+    pub fn clear_input_gain(&self) { self.input_gain_db.store(f32::NAN); }
+    #[inline]
+    pub fn clear_output_gain(&self) { self.output_gain_db.store(f32::NAN); }
+    #[inline]
+    pub fn clear_dry_wet(&self) { self.dry_wet.store(f32::NAN); }
+    #[inline]
+    pub fn clear_drive(&self, band: usize) { self.drive_db[band].store(f32::NAN); }
+}
+
+// ============================================================
 //  Plugin struct
 // ============================================================
 
 struct Ivylace {
     params: Arc<IvylaceParams>,
+    /// Immediate GUI→audio overrides for non-slot parameters
+    global_overrides: Arc<GlobalOverrides>,
     crossover: FourBandCrossover,
     compressors: [SslCompressor; NUM_BANDS],
     saturation: MultibandSaturation,
@@ -283,6 +352,10 @@ struct Ivylace {
     slot_a: Arc<SlotStorage>,
     /// A/B slot B (AUTO results)
     slot_b: Arc<SlotStorage>,
+    /// TRIM detector (dry/wet RMS measurement)
+    trim_detector: TrimDetector,
+    /// Shared state for TRIM measurement (audio thread ↔ GUI)
+    trim_state: Arc<TrimState>,
 }
 
 // ============================================================
@@ -302,6 +375,10 @@ pub struct IvylaceParams {
     /// Delta monitor mode (listen to wet−dry difference)
     #[persist = "delta-monitor"]
     pub(crate) delta_monitor: Arc<AtomicBool>,
+
+    /// TRIM enabled (auto gain matching wet to dry level)
+    #[persist = "trim-enabled"]
+    pub(crate) trim_enabled: Arc<AtomicBool>,
 
     // --- Global ---
     #[id = "input_gain"]
@@ -353,6 +430,9 @@ pub struct IvylaceParams {
     /// Slot B persistence
     #[persist = "slot-b-data"]
     pub(crate) slot_b_persist: std::sync::Mutex<SlotPersist>,
+
+    /// Immediate GUI→audio overrides for non-slot params (not a DAW parameter)
+    pub(crate) global_overrides: Arc<GlobalOverrides>,
 }
 
 #[derive(Params)]
@@ -584,6 +664,7 @@ impl Default for Ivylace {
         let slot_b = Arc::new(SlotStorage::new_with_defaults());
         let ab_is_b = Arc::new(AtomicBool::new(false));
         let auto_state = Arc::new(AutoAnalysisState::new());
+        let global_overrides = Arc::new(GlobalOverrides::new());
 
         // Default slot persist values (match SlotStorage::new_with_defaults)
         let default_persist = SlotPersist {
@@ -600,6 +681,7 @@ impl Default for Ivylace {
                 editor_state: editor::default_state(),
                 glass_mode: Arc::new(AtomicBool::new(false)),
                 delta_monitor: Arc::new(AtomicBool::new(false)),
+                trim_enabled: Arc::new(AtomicBool::new(false)),
 
                 input_gain: FloatParam::new(
                     "Input Gain",
@@ -697,7 +779,9 @@ impl Default for Ivylace {
                 ab_active_is_b: ab_is_b,
                 slot_a_persist: std::sync::Mutex::new(default_persist.clone()),
                 slot_b_persist: std::sync::Mutex::new(default_persist),
+                global_overrides: global_overrides.clone(),
             }),
+            global_overrides,
             crossover: FourBandCrossover::new(44100.0),
             compressors: [
                 SslCompressor::new(44100.0),
@@ -725,6 +809,8 @@ impl Default for Ivylace {
             auto_measure_samples: 44100,
             slot_a,
             slot_b,
+            trim_detector: TrimDetector::new(44100.0),
+            trim_state: Arc::new(TrimState::new()),
         }
     }
 }
@@ -769,6 +855,7 @@ impl Plugin for Ivylace {
             self.params.editor_state.clone(),
             self.slot_a.clone(),
             self.slot_b.clone(),
+            self.trim_state.clone(),
         )
     }
 
@@ -788,6 +875,7 @@ impl Plugin for Ivylace {
             meter.set_sample_rate(sr);
         }
         self.auto_measure_samples = sr as u64; // 1 second
+        self.trim_detector.set_sample_rate(sr);
         self.is_rendering = buffer_config.process_mode == ProcessMode::Offline;
 
         // Restore A/B slot data from persistence (nih-plug deserializes #[persist] fields
@@ -903,11 +991,21 @@ impl Plugin for Ivylace {
         self.crossover.set_frequencies(xover_freqs);
 
         // Process audio — smoothed parameters are read per-sample inside the loop
+        let ovr = &self.global_overrides;
         for mut channel_samples in buffer.iter_samples() {
             // Per-sample smoothed parameters (prevents zipper noise at large block sizes)
-            let input_gain_db = self.params.input_gain.smoothed.next();
-            let output_gain_db = self.params.output_gain.smoothed.next();
-            let dry_wet = self.params.dry_wet.smoothed.next();
+            // Global overrides take priority when set (GUI keyboard input bypass).
+            let smoothed_ig = self.params.input_gain.smoothed.next();
+            let smoothed_og = self.params.output_gain.smoothed.next();
+            let smoothed_dw = self.params.dry_wet.smoothed.next();
+
+            let ovr_ig = ovr.input_gain_db.load();
+            let ovr_og = ovr.output_gain_db.load();
+            let ovr_dw = ovr.dry_wet.load();
+
+            let input_gain_db = if ovr_ig.is_nan() { smoothed_ig } else { ovr_ig };
+            let output_gain_db = if ovr_og.is_nan() { smoothed_og } else { ovr_og };
+            let dry_wet = if ovr_dw.is_nan() { smoothed_dw } else { ovr_dw };
 
             let input_gain = (input_gain_db as f64 * std::f64::consts::LN_10 / 20.0).exp();
             let output_gain = (output_gain_db as f64 * std::f64::consts::LN_10 / 20.0).exp();
@@ -923,8 +1021,9 @@ impl Plugin for Ivylace {
                 let _ = band_params.sc_hpf.smoothed.next();
             }
             for (i, sat_params) in self.params.sat_bands.iter().enumerate() {
-                // Convert dB (0..6) to linear drive (0..1)
-                let drive_db = sat_params.drive.smoothed.next() as f64;
+                let smoothed_drive = sat_params.drive.smoothed.next() as f64;
+                let ovr_drive = ovr.drive_db[i].load();
+                let drive_db = if ovr_drive.is_nan() { smoothed_drive } else { ovr_drive as f64 };
                 self.saturation.bands[i].set_drive(drive_db / 6.0);
             }
 
@@ -1005,6 +1104,31 @@ impl Plugin for Ivylace {
                     dry_r += band_dry_r;
                 }
             }
+
+            // TRIM measurement: accumulate dry/wet RMS over 3 seconds
+            if self.trim_state.active.load(Ordering::Relaxed) {
+                if !self.trim_detector.is_active() {
+                    self.trim_detector.start();
+                }
+                self.trim_detector.process_sample(dry_l, dry_r, out_l, out_r);
+                self.trim_state.progress.store(self.trim_detector.progress());
+                if self.trim_detector.is_done() {
+                    self.trim_state.trim_gain_db.store(self.trim_detector.trim_gain_db() as f32);
+                    self.trim_state.done.store(true, Ordering::Release);
+                    self.trim_state.active.store(false, Ordering::Release);
+                    // Auto-enable trim after successful measurement
+                    self.params.trim_enabled.store(true, Ordering::Relaxed);
+                }
+            }
+
+            // Apply TRIM gain to wet signal (before dry/wet mix)
+            let (out_l, out_r) = if self.params.trim_enabled.load(Ordering::Relaxed) {
+                let db = self.trim_state.trim_gain_db.load() as f64;
+                let gain = 10.0_f64.powf(db / 20.0);
+                (out_l * gain, out_r * gain)
+            } else {
+                (out_l, out_r)
+            };
 
             // Delta monitor or normal dry/wet mix
             let (final_l, final_r) = if delta_monitor {

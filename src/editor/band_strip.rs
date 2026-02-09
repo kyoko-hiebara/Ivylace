@@ -12,7 +12,7 @@ use super::segmented::{SegmentedParam, SlotEnumKind, SlotEnumSource};
 use super::toggle::{ToggleButton, ToggleVariant};
 use super::theme::{self, ThemeMode};
 use super::Data;
-use crate::{IvylaceParams, SlotStorage};
+use crate::{GlobalOverrides, IvylaceParams, SlotStorage};
 
 fn mode_lens() -> impl Lens<Target = ThemeMode> {
     Data::params.map(|p| {
@@ -91,6 +91,7 @@ impl BandStrip {
                         kind: SlotParamKind::ThresholdDb,
                         band_idx,
                     }),
+                    None, // no global override (uses slot atomics)
                 )
                 .left(Stretch(1.0))
                 .right(Stretch(1.0));
@@ -160,6 +161,7 @@ impl BandStrip {
                             slot_a: sa3.clone(), slot_b: sb3.clone(),
                             is_b: ab3.clone(), kind: SlotParamKind::MakeupDb, band_idx,
                         }),
+                        None,
                     );
                     GlassKnob::new_full(
                         cx,
@@ -175,6 +177,7 @@ impl BandStrip {
                             slot_a: sa3.clone(), slot_b: sb3.clone(),
                             is_b: ab3.clone(), kind: SlotParamKind::ScHpfHz, band_idx,
                         }),
+                        None,
                     );
                 })
                 .col_between(Pixels(2.0))
@@ -195,6 +198,7 @@ impl BandStrip {
                         .height(Pixels(12.0));
 
                     let gm4b = gm4.clone();
+                    let ovr_drive = Data::params.get(cx).global_overrides.clone();
                     HStack::new(cx, move |cx| {
                         GlassKnob::new(
                             cx,
@@ -204,6 +208,7 @@ impl BandStrip {
                             theme::accent(),
                             "Drive",
                             gm4b.clone(),
+                            Some((ovr_drive.clone(), super::knob::GlobalOverrideKind::DriveDb(band_idx))),
                         );
                         ToggleButton::new(
                             cx,

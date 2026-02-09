@@ -558,6 +558,53 @@ pub fn theme_toggle_moon(mode: ThemeMode) -> vg::Color {
     }
 }
 
+// ── Theme toggle crescent bite ──────────────────────────────
+
+/// Opaque background color for the crescent moon "bite" in the theme toggle.
+/// Must match the actual rendered background behind the toggle (title bar area).
+pub fn theme_toggle_bite_bg(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgb(0x2B, 0x26, 0x52),    // dark purple (page bg top)
+        ThemeMode::Glass => vg::Color::rgb(0xF2, 0xF6, 0xFB),   // near-white (page bg top)
+    }
+}
+
+// ── TRIM / BYPASS button colors ────────────────────────────
+
+/// TRIM button active color (green tint for "gain matching enabled")
+pub fn trim_active(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(80, 200, 120, 220),
+        ThemeMode::Glass => vg::Color::rgba(50, 180, 100, 220),
+    }
+}
+
+/// BYPASS button active color (red warning)
+pub fn bypass_active(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(220, 80, 60, 220),
+        ThemeMode::Glass => vg::Color::rgba(200, 60, 40, 220),
+    }
+}
+
+// ── Text edit (inline keyboard input) ────────────────────────
+
+/// Text input editing background
+pub fn text_edit_bg(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(204, 126, 177, 60),
+        ThemeMode::Glass => vg::Color::rgba(137, 195, 235, 55),
+    }
+}
+
+/// Text input editing border
+pub fn text_edit_border(mode: ThemeMode) -> vg::Color {
+    match mode {
+        ThemeMode::Dark => vg::Color::rgba(204, 126, 177, 100),
+        ThemeMode::Glass => vg::Color::rgba(137, 195, 235, 90),
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 /// Create a color from a band color with modified alpha

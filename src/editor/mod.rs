@@ -8,7 +8,7 @@ use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
 
 use crate::dsp::gr_meter::GrMeterOutputs;
 use crate::dsp::spectrum::SpectrumBuffer;
-use crate::{AutoAnalysisState, IvylaceParams, SlotStorage};
+use crate::{AutoAnalysisState, IvylaceParams, SlotStorage, TrimState};
 
 use auto_button::{AutoOverlay, SharedAutoPhase};
 
@@ -35,6 +35,7 @@ pub(crate) struct Data {
     pub auto_state: Arc<AutoAnalysisState>,
     pub slot_a: Arc<SlotStorage>,
     pub slot_b: Arc<SlotStorage>,
+    pub trim_state: Arc<TrimState>,
 }
 
 impl Model for Data {}
@@ -55,6 +56,7 @@ pub(crate) fn create(
     editor_state: Arc<ViziaState>,
     slot_a: Arc<SlotStorage>,
     slot_b: Arc<SlotStorage>,
+    trim_state: Arc<TrimState>,
 ) -> Option<Box<dyn Editor>> {
     create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, gui_context| {
         assets::register_noto_sans_light(cx);
@@ -68,6 +70,7 @@ pub(crate) fn create(
             auto_state: auto_state.clone(),
             slot_a: slot_a.clone(),
             slot_b: slot_b.clone(),
+            trim_state: trim_state.clone(),
         }
         .build(cx);
 
@@ -85,8 +88,8 @@ pub(crate) fn create(
             let p = Data::params.get(cx);
             let glass_mode = p.glass_mode.clone();
 
-            build_title_bar(cx, about_visible.clone());
-            header::Header::new(cx, glass_mode.clone(), auto_phase.clone());
+            build_title_bar(cx, about_visible.clone(), glass_mode.clone());
+            header::Header::new(cx, glass_mode.clone(), auto_phase.clone(), trim_state.clone());
             crossover::CrossoverDisplay::new(cx, glass_mode.clone());
             spectrum::SpectrumAnalyzer::new(
                 cx,
@@ -127,7 +130,7 @@ pub(crate) fn create(
 
 // ── Title Bar ────────────────────────────────────────────────
 
-fn build_title_bar(cx: &mut Context, about_visible: Arc<AtomicBool>) {
+fn build_title_bar(cx: &mut Context, about_visible: Arc<AtomicBool>, glass_mode: Arc<AtomicBool>) {
     let border_lens = Data::params.map(|p| {
         let mode = if p.glass_mode.load(Ordering::Relaxed) { theme::ThemeMode::Glass } else { theme::ThemeMode::Dark };
         theme::to_vizia(theme::title_bar_border(mode))
@@ -138,6 +141,11 @@ fn build_title_bar(cx: &mut Context, about_visible: Arc<AtomicBool>) {
             .width(Stretch(1.0))
             .child_top(Stretch(1.0))
             .child_bottom(Stretch(1.0));
+
+        ThemeToggle::new(cx, glass_mode.clone())
+            .top(Stretch(1.0))
+            .bottom(Stretch(1.0))
+            .right(Pixels(8.0));
     })
     .height(Pixels(28.0))
     .border_color(border_lens)
@@ -186,6 +194,110 @@ impl View for TitleBarLabel {
                 // Toggle about dialog visibility
                 let current = self.about_visible.load(Ordering::Relaxed);
                 self.about_visible.store(!current, Ordering::Relaxed);
+                cx.needs_redraw();
+                meta.consume();
+            }
+        });
+    }
+}
+
+// ── Theme Toggle Button (sun/moon icon) ─────────────────────
+
+struct ThemeToggle {
+    glass_mode: Arc<AtomicBool>,
+}
+
+impl ThemeToggle {
+    fn new(cx: &mut Context, glass_mode: Arc<AtomicBool>) -> Handle<'_, Self> {
+        Self { glass_mode }
+            .build(cx, |_| {})
+            .width(Pixels(24.0))
+            .height(Pixels(24.0))
+            .cursor(CursorIcon::Hand)
+    }
+}
+
+impl View for ThemeToggle {
+    fn element(&self) -> Option<&'static str> {
+        Some("theme-toggle")
+    }
+
+    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+        let bounds = cx.bounds();
+        if bounds.w < 1.0 || bounds.h < 1.0 {
+            return;
+        }
+
+        let is_glass = self.glass_mode.load(Ordering::Relaxed);
+        let mode = if is_glass { theme::ThemeMode::Glass } else { theme::ThemeMode::Dark };
+        let dpi = cx.scale_factor();
+        let cx_x = bounds.x + bounds.w * 0.5;
+        let cy = bounds.y + bounds.h * 0.5;
+        let r = 9.0 * dpi;
+
+        // Background circle
+        let mut path = vg::Path::new();
+        path.circle(cx_x, cy, r);
+
+        if is_glass {
+            // Glass mode active: show crescent moon icon (switch to Dark)
+            // Use opaque page background color so the bite fully erases
+            let bg_opaque = theme::theme_toggle_bite_bg(mode);
+            canvas.fill_path(&path, &vg::Paint::color(bg_opaque));
+            let mut border = vg::Paint::color(theme::toggle_off_border(mode));
+            border.set_line_width(1.0 * dpi);
+            canvas.stroke_path(&path, &border);
+
+            // Crescent moon: draw full moon circle, then erase with offset circle
+            let moon_r = 6.0 * dpi;
+            let mut moon = vg::Path::new();
+            moon.circle(cx_x - 1.0 * dpi, cy, moon_r);
+            canvas.fill_path(&moon, &vg::Paint::color(theme::theme_toggle_moon(mode)));
+
+            // "Bite" circle erases part of the moon to form crescent shape
+            let bite_r = 5.5 * dpi;
+            let bite_offset = 4.0 * dpi;
+            let mut bite = vg::Path::new();
+            bite.circle(cx_x - 1.0 * dpi + bite_offset, cy, bite_r);
+            canvas.fill_path(&bite, &vg::Paint::color(bg_opaque));
+        } else {
+            // Dark mode: show sun icon (bright circle with rays)
+            let bg_opaque = theme::theme_toggle_bite_bg(mode);
+            canvas.fill_path(&path, &vg::Paint::color(bg_opaque));
+            let mut border = vg::Paint::color(theme::toggle_off_border(mode));
+            border.set_line_width(1.0 * dpi);
+            canvas.stroke_path(&path, &border);
+
+            // Sun circle
+            let sun_r = 3.5 * dpi;
+            let mut sun = vg::Path::new();
+            sun.circle(cx_x, cy, sun_r);
+            canvas.fill_path(&sun, &vg::Paint::color(theme::theme_toggle_sun(mode)));
+
+            // Sun rays
+            let ray_len = 2.0 * dpi;
+            let ray_start = sun_r + 1.5 * dpi;
+            let mut ray_paint = vg::Paint::color(theme::theme_toggle_sun_ray(mode));
+            ray_paint.set_line_width(1.5 * dpi);
+            for i in 0..8 {
+                let angle = (i as f32) * std::f32::consts::PI / 4.0;
+                let x0 = cx_x + angle.cos() * ray_start;
+                let y0 = cy + angle.sin() * ray_start;
+                let x1 = cx_x + angle.cos() * (ray_start + ray_len);
+                let y1 = cy + angle.sin() * (ray_start + ray_len);
+                let mut ray = vg::Path::new();
+                ray.move_to(x0, y0);
+                ray.line_to(x1, y1);
+                canvas.stroke_path(&ray, &ray_paint);
+            }
+        }
+    }
+
+    fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
+        event.map(|window_event, meta| {
+            if let WindowEvent::MouseDown(MouseButton::Left) = window_event {
+                let current = self.glass_mode.load(Ordering::Relaxed);
+                self.glass_mode.store(!current, Ordering::Relaxed);
                 cx.needs_redraw();
                 meta.consume();
             }

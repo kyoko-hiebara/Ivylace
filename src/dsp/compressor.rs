@@ -209,6 +209,10 @@ impl SslCompressor {
     }
 
     pub fn set_sidechain_hpf(&mut self, freq: f64) {
+        // Skip expensive sin/cos recalculation if frequency hasn't changed
+        if (freq - self.sc_hpf_freq).abs() < 1e-6 {
+            return;
+        }
         self.sc_hpf_freq = freq;
         self.sc_hpf_l.set_frequency(freq, self.sample_rate);
         self.sc_hpf_r.set_frequency(freq, self.sample_rate);
@@ -357,15 +361,15 @@ mod tests {
     use super::*;
 
     /// Test compressor gain at various frequencies with SC HPF at 80Hz.
-    /// The bugged alpha (Q=√2 resonant) in SC HPF causes the sidechain to see
-    /// a resonant boost around 80Hz, leading to MORE compression there and
-    /// LESS compression at very low freqs → apparent low-end boost.
+    /// Corrected Butterworth Q (1/√2 ≈ 0.707): flat passband, no resonant peak.
+    /// Low frequencies below the HPF cutoff are attenuated in the sidechain,
+    /// reducing compression on bass content — the intended "glue" behavior.
     #[test]
     fn test_compressor_with_sc_hpf_80() {
         let sr = 44100.0;
         let test_freqs = [10.0, 20.0, 25.0, 30.0, 50.0, 80.0, 100.0, 500.0, 1000.0];
 
-        eprintln!("--- SC HPF = 80Hz (with current bugged alpha) ---");
+        eprintln!("--- SC HPF = 80Hz (Butterworth Q = 1/√2) ---");
         for &test_freq in &test_freqs {
             let mut comp = SslCompressor::new(sr);
             comp.set_threshold(-20.0);

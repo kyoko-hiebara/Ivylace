@@ -5,3 +5,4 @@ pub mod gr_meter;
 pub mod oversampling;
 pub mod saturation;
 pub mod spectrum;
+pub mod trim_detect;
